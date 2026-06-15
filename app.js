@@ -1066,8 +1066,8 @@ class ForumApp {
         return `
             <div class="home-page">
                 <div class="hero-section">
-                    <h1>🌐 XFA Student Community</h1>
-                    <p>学生实时交流社区，打开即共享</p>
+                    <h1>🏫 学生校园墙</h1>
+                    <p>校园交流社区，打开即共享</p>
                     ${this.currentUser && !isPending ? `
                         <button onclick="app.openPostModal()" class="btn btn-large btn-primary">✏️ 发布新帖</button>
                         ${(this.isAdmin(this.currentUser.id)) ? `<button onclick="app.openPostModal(true)" class="btn btn-large" style="background:#dc2626;color:white;margin-left:8px;">📢 发布公告</button>` : ''}
@@ -2352,13 +2352,15 @@ class ForumApp {
             let icon = '📎';
             let warn = '';
             if (f.type.startsWith('video/')) {
-                icon = '🎬';
-                if (f.size > 512 * 1024) {
-                    warn = ' <span style="color:#f59e0b">(超过512KB，将转为缩略图发布)</span>';
-                } else {
-                    warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
-                }
-            } else if (f.type.startsWith('image/')) {
+                    icon = '🎬';
+                    if (f.size > 3 * 1024 * 1024) {
+                        warn = ' <span style="color:#ef4444">(超过3MB，将转为缩略图发布)</span>';
+                    } else if (f.size > 1.5 * 1024 * 1024) {
+                        warn = ' <span style="color:#f59e0b">(较大，免费服务器可能拒绝)</span>';
+                    } else {
+                        warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
+                    }
+                } else if (f.type.startsWith('image/')) {
                 icon = '🖼️';
                 if (f.size > 2 * 1024 * 1024) warn = ' <span style="color:#f59e0b">(将自动压缩)</span>';
             }
@@ -2381,16 +2383,10 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 512 * 1024;
+        const videoLimit = 3 * 1024 * 1024;
         let hasLargeVideo = false;
+        let hasMediumVideo = false;
         if (filesInput.files.length > 0) {
-            let totalRawSize = 0;
-            for (const file of filesInput.files) {
-                totalRawSize += file.size;
-            }
-            if (totalRawSize > 1 * 1024 * 1024) {
-                alert('⚠️ 文件总大小超过 1MB，可能无法发送给其他用户。\n建议：使用更小的视频或截图。');
-            }
             for (const file of filesInput.files) {
                 if (file.type.startsWith('image/')) {
                     try {
@@ -2407,6 +2403,9 @@ class ForumApp {
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
+                            if (file.size > 1.5 * 1024 * 1024) {
+                                hasMediumVideo = true;
+                            }
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             mediaFiles.push(thumb);
@@ -2447,27 +2446,32 @@ class ForumApp {
             const sizeMB = (jsonStr.length / 1024 / 1024);
             console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB');
 
-            const realLimit = 1.2 * 1024 * 1024;
-            const hardLimit = 2 * 1024 * 1024;
+            const realLimit = 2 * 1024 * 1024;
+            const warnLimit = 4 * 1024 * 1024;
+            const hardLimit = 5 * 1024 * 1024;
 
             let willPublish = jsonStr.length <= hardLimit;
             let publishConfirmMsg = '';
 
             if (hasLargeVideo) {
-                publishConfirmMsg += '⚠️ 部分视频超过512KB，已转为缩略图发布（其他用户只能看到截图，不能播放视频）\n\n';
+                publishConfirmMsg += '⚠️ 部分视频超过3MB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
             }
 
-            if (jsonStr.length > realLimit && jsonStr.length <= hardLimit) {
-                publishConfirmMsg += '⚠️ 警告：帖子内容较大 (' + sizeMB.toFixed(2) + 'MB)！\n超过 1.2MB 后其他用户可能收不到。\n\n建议：\n1. 只用更小的视频（5秒以内的短视频）\n2. 只发图片，不要视频\n\n';
+            if (hasMediumVideo || jsonStr.length > realLimit) {
+                publishConfirmMsg += '⚠️ 视频较大 (' + sizeMB.toFixed(2) + 'MB)！\n\n免费服务器有限制，超过 2MB 的视频可能发不出去。\n\n建议：\n1. 视频控制在 30 秒以内\n2. 用低分辨率拍摄\n3. 或直接发截图代替视频\n\n';
+            }
+
+            if (jsonStr.length > warnLimit && jsonStr.length <= hardLimit) {
+                publishConfirmMsg += '🚨 警告：帖子内容非常大！\n（' + sizeMB.toFixed(2) + 'MB，超过 4MB）\n\n免费服务器很可能拒绝这个消息。\n建议只发短小视频或图片。\n\n';
             }
 
             if (!willPublish) {
-                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 2MB 无法发送。\n\n请用更小的视频或只发图片。');
+                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 5MB 无法发送。\n\n请用更短更小的视频，或只发图片。');
                 return;
             }
 
             if (publishConfirmMsg) {
-                if (!confirm(publishConfirmMsg + '\n是否仍然发布？')) {
+                if (!confirm(publishConfirmMsg + '是否仍然发布？')) {
                     return;
                 }
             }
@@ -2475,7 +2479,7 @@ class ForumApp {
             this.publish(`forum/posts/${postId}`, { type: 'post', data: postData }, true, (err) => {
                 if (err) {
                     console.error('发布失败:', err);
-                    alert('❌ 帖子消息发送失败: ' + (err.message || '消息过大被拒绝'));
+                    alert('❌ 帖子消息发送失败：内容太大，服务器拒绝了\n\n（别人收不到这个帖子，只有你自己能看到）');
                 } else {
                     console.log('✅ 帖子已发布到 MQTT');
                 }
@@ -2935,11 +2939,16 @@ class ForumApp {
             const chatJsonStr = JSON.stringify({ type: 'chat_message', data: msgData });
             const chatSizeMB = (chatJsonStr.length / 1024 / 1024).toFixed(2);
             console.log('📤 聊天消息大小:', chatSizeMB, 'MB', '类型:', mediaType);
-            if (chatJsonStr.length > 1.5 * 1024 * 1024) {
-                alert('⚠️ 消息过大 (' + chatSizeMB + 'MB)，可能对方收不到。\n建议使用更小的视频（5秒以内）或只发图片');
+            if (chatJsonStr.length > 2 * 1024 * 1024 && chatJsonStr.length <= 4 * 1024 * 1024) {
+                alert('⚠️ 消息较大 (' + chatSizeMB + 'MB)，免费服务器有限制\n超过 2MB 的内容可能发不出去');
             }
-            if (chatJsonStr.length > 2 * 1024 * 1024) {
-                alert('❌ 消息超过 2MB，无法发送。\n请用更小的视频或截图代替');
+            if (chatJsonStr.length > 4 * 1024 * 1024 && chatJsonStr.length <= 5 * 1024 * 1024) {
+                if (!confirm('🚨 消息非常大 (' + chatSizeMB + 'MB)！\n\n免费服务器很可能拒绝这个消息。\n是否仍然发送？')) {
+                    return;
+                }
+            }
+            if (chatJsonStr.length > 5 * 1024 * 1024) {
+                alert('❌ 消息超过 5MB，无法发送。\n请用更短更小的视频，或发截图代替');
                 return;
             }
         } catch (e) {
@@ -2948,7 +2957,7 @@ class ForumApp {
         this.publish(`forum/msg/${toUserId}/${msgId}`, { type: 'chat_message', data: msgData }, true, (err) => {
             if (err) {
                 console.error('聊天消息发送失败:', err);
-                alert('❌ 消息发送失败: 内容太大，对方收不到');
+                alert('❌ 消息发送失败：内容太大，对方收不到');
             }
         });
         this.publish(`forum/msg/${this.currentUser.id}/${msgId}`, { type: 'chat_message', data: msgData }, true);
@@ -3026,14 +3035,17 @@ class ForumApp {
                         const base64 = await this.compressImage(file);
                         this.sendChatMessage(friendId, '', 'image', base64);
                     } else if (file.type.startsWith('video/')) {
-                        if (file.size <= 512 * 1024) {
+                        if (file.size <= 3 * 1024 * 1024) {
                             console.log('💬 处理聊天视频:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
                             const base64 = await this.fileToBase64(file);
                             this.sendChatMessage(friendId, '', 'video', base64);
+                            if (file.size > 1.5 * 1024 * 1024) {
+                                alert('⚠️ 视频较大，免费服务器有限制\n超过 2MB 的内容可能发不出去');
+                            }
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             this.sendChatMessage(friendId, '', 'video', thumb);
-                            alert('视频超过 512KB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
+                            alert('视频超过 3MB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
                         }
                     }
                 } catch (err) {
