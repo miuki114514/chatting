@@ -178,14 +178,15 @@ class ForumApp {
                 this.client = null;
             }
 
-            const PRIMARY_BROKER = 'wss://broker.emqx.io:8084/mqtt';
-            const WS_FALLBACK = 'ws://broker.emqx.io:8083/mqtt';
-            const CN_FALLBACK = 'wss://broker-cn.emqx.io:8084/mqtt';
+            const CN_BROKER = 'wss://broker-cn.emqx.io:8084/mqtt';
+            const INT_BROKER = 'wss://broker.emqx.io:8084/mqtt';
+            const INT_WS = 'ws://broker.emqx.io:8083/mqtt';
 
             this.myClientId = 'forum_' + Math.random().toString(36).substr(2, 10) + '_' + Date.now();
 
-            let triedWsFallback = false;
-            let triedCnFallback = false;
+            let triedInt = false;
+            let triedIntWs = false;
+            let triedCn = false;
             let alreadySwitched = false;
             let callbackFired = false;
 
@@ -214,7 +215,8 @@ class ForumApp {
                 client.on('connect', () => {
                     this.connected = true;
                     this.currentBroker = brokerUrl;
-                    const nodeLabel = brokerUrl.includes('broker-cn') ? '国内' : '国际';
+                    const isCn = brokerUrl.includes('broker-cn');
+                    const nodeLabel = isCn ? '国内' : '国际';
                     this.updateConnectionStatus('🟢 ' + nodeLabel);
                     console.log('已连接:', brokerUrl);
                     this.subscribeTopics();
@@ -223,20 +225,9 @@ class ForumApp {
                         this.publishAllDataAsRetained();
                         this.flushOfflineQueue();
                         this.requestSync();
-                        if (this.currentPage) this.renderCurrentPage();
                     }, 1000);
-                    setTimeout(() => {
-                        this.requestSync();
-                        if (this.currentPage) this.renderCurrentPage();
-                    }, 4000);
-                    setTimeout(() => {
-                        this.requestSync();
-                        if (this.currentPage) this.renderCurrentPage();
-                    }, 8000);
-                    setTimeout(() => {
-                        this.requestSync();
-                        if (this.currentPage) this.renderCurrentPage();
-                    }, 15000);
+                    setTimeout(() => this.requestSync(), 5000);
+                    setTimeout(() => this.requestSync(), 12000);
                 });
 
                 let chatMsgCount = 0;
@@ -262,20 +253,20 @@ class ForumApp {
                 client.on('error', (err) => {
                     console.error('MQTT 错误:', err.message || err);
                     this.connected = false;
-                    if (!alreadySwitched && brokerUrl === PRIMARY_BROKER && !triedWsFallback) {
+                    if (!alreadySwitched && brokerUrl === CN_BROKER && !triedInt) {
                         alreadySwitched = true;
-                        triedWsFallback = true;
+                        triedInt = true;
                         try { client.end(true); } catch (e) {}
                         this.client = null;
-                        console.log('WSS 协议失败，尝试 WS 协议（同一节点）');
-                        setTimeout(() => doConnect(WS_FALLBACK), 500);
-                    } else if (!alreadySwitched && brokerUrl === WS_FALLBACK && !triedCnFallback) {
+                        console.log('国内节点失败，尝试国际节点（可能需要VPN）');
+                        setTimeout(() => doConnect(INT_BROKER), 500);
+                    } else if (!alreadySwitched && brokerUrl === INT_BROKER && !triedIntWs) {
                         alreadySwitched = true;
-                        triedCnFallback = true;
+                        triedIntWs = true;
                         try { client.end(true); } catch (e) {}
                         this.client = null;
-                        console.log('国际节点都失败，尝试国内节点（注意：国内节点发的消息国际节点用户看不到）');
-                        setTimeout(() => doConnect(CN_FALLBACK), 800);
+                        console.log('国际 WSS 失败，尝试国际 WS');
+                        setTimeout(() => doConnect(INT_WS), 500);
                     } else {
                         this.updateConnectionStatus('🟠 连接错误');
                     }
@@ -295,7 +286,7 @@ class ForumApp {
                 });
             };
 
-            doConnect(PRIMARY_BROKER);
+            doConnect(CN_BROKER);
         } catch (e) {
             console.error('MQTT 初始化失败:', e);
             this.updateConnectionStatus('❌ 不可用');
@@ -418,26 +409,17 @@ class ForumApp {
                 this.flushOfflineQueue();
                 console.log('🔄 手动同步：首次请求');
             }
-            if (this.currentPage) {
-                this.renderCurrentPage();
-            }
         }, 3000);
         setTimeout(() => {
             if (this.connected) {
                 this.requestSync();
                 console.log('🔄 手动同步：二次请求');
             }
-            if (this.currentPage) {
-                this.renderCurrentPage();
-            }
         }, 7000);
         setTimeout(() => {
             if (this.connected) {
                 this.requestSync();
                 console.log('🔄 手动同步：三次请求');
-            }
-            if (this.currentPage) {
-                this.renderCurrentPage();
             }
         }, 12000);
     }
@@ -545,8 +527,6 @@ class ForumApp {
             console.log('🗑️ 收到帖子删除通知:', post.id);
             if (this.currentPage === 'post' && this.currentPostId === post.id) {
                 this.router('home');
-            } else if (this.currentPage === 'home' || this.currentPage === 'explore' || this.currentPage === 'profile') {
-                this.renderCurrentPage();
             }
             return;
         }
@@ -572,9 +552,6 @@ class ForumApp {
         }
         if (changed) {
             this.saveLocalData();
-            if (this.currentPage === 'home' || this.currentPage === 'explore' || this.currentPage === 'post' || this.currentPage === 'profile') {
-                this.renderCurrentPage();
-            }
         }
     }
 
@@ -590,9 +567,6 @@ class ForumApp {
             }
             this.saveLocalData();
             console.log('🗑️ 收到评论删除通知:', comment.id);
-            if (this.currentPage === 'post' && this.currentPostId === comment.postId) {
-                this.renderCurrentPage();
-            }
             return;
         }
         if (this.deletedCommentIds.includes(comment.id)) {
@@ -622,9 +596,6 @@ class ForumApp {
         }
         if (changed) {
             this.saveLocalData();
-            if (this.currentPage === 'post' || this.currentPage === 'home' || this.currentPage === 'profile' || this.currentPage === 'explore') {
-                this.renderCurrentPage();
-            }
         }
     }
 
@@ -675,9 +646,6 @@ class ForumApp {
             this.saveLocalData();
             this.updateUserUI();
             console.log('👤 用户数据已同步:', user.nickname || user.id, '原因:', reason);
-            if (this.currentPage === 'profile' || this.currentPage === 'explore' || this.currentPage === 'admin' || this.currentPage === 'home' || this.currentPage === 'post' || this.currentPage === 'chats' || this.currentPage === 'chat') {
-                this.renderCurrentPage();
-            }
         }
     }
 
@@ -856,7 +824,6 @@ class ForumApp {
             Object.values(data.users).forEach(u => this.mergeUser(u));
         }
         this.saveLocalData();
-        this.renderCurrentPage();
     }
 
     // ========== 路由系统 ==========
@@ -1782,9 +1749,6 @@ class ForumApp {
         this.saveLocalData();
 
         if (role === 'pending') {
-            this.currentUser = { id: userId, username, nickname };
-            localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
-            this.updateUserUI();
             try {
                 this.connectMQTT(() => {
                     this.publish(`forum/users/${userId}`, { type: 'user', data: userData }, true);
@@ -1797,10 +1761,10 @@ class ForumApp {
                     }, true);
                 });
             } catch (e) {
-                console.log('注册时 MQTT 连接失败，用户信息已保存本地:', e);
+                console.log('注册时 MQTT 连接失败:', e);
             }
-            alert('✅ 注册申请已提交！\n\n请等待管理员审核通过。\n\n保持此页面打开，审核通过后会自动刷新页面。');
-            this.router('home');
+            alert('✅ 注册申请已提交！\n\n请等待管理员审核通过。\n\n你可以关闭此页面，稍后回来查看状态。\n审核通过后即可登录。');
+            this.router('login');
         } else {
             this.currentUser = { id: userId, username, nickname };
             localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
@@ -1836,6 +1800,21 @@ class ForumApp {
             const user = Object.values(this.users).find(u => u.username === username && u.password === password);
             if (!user) return false;
 
+            if (user.role === 'pending') {
+                alert('⏳ 你的账号正在等待管理员审核。\n\n审核通过后才能登录。\n请耐心等待，或使用其他账号。');
+                return true;
+            }
+
+            if (user.role === 'rejected') {
+                alert('❌ 你的注册申请未通过审核，无法登录。');
+                return true;
+            }
+
+            if (user.banned) {
+                alert('你已被管理员封禁，无法登录。');
+                return true;
+            }
+
             this.currentUser = { id: user.id, username: user.username, nickname: user.nickname };
             localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
             this.updateUserUI();
@@ -1848,31 +1827,8 @@ class ForumApp {
                 console.error('登录后 MQTT 连接失败:', e);
             }
 
-            setTimeout(() => {
-                const latestUser = this.users[user.id];
-                if (latestUser && latestUser.banned) {
-                    alert('你已被管理员封禁，无法登录。');
-                    this.currentUser = null;
-                    localStorage.removeItem('currentUser');
-                    this.router('home');
-                    return;
-                }
-                if (latestUser && latestUser.role === 'rejected') {
-                    alert('❌ 你的注册申请未通过审核，无法登录。');
-                    this.currentUser = null;
-                    localStorage.removeItem('currentUser');
-                    this.router('home');
-                    return;
-                }
-                if (latestUser && latestUser.role === 'pending') {
-                    alert('⏳ 你的账号正在等待管理员审核。\n\n已登录并连接服务器，保持页面打开，审核通过后会自动刷新。');
-                    this.router('home');
-                    return;
-                }
-                this.publish(`forum/users/${user.id}`, { type: 'user', data: latestUser }, true);
-                alert('✅ 登录成功！欢迎回来，' + (latestUser.nickname || latestUser.username));
-                this.router('home');
-            }, 2500);
+            alert('✅ 登录成功！欢迎回来，' + (user.nickname || user.username));
+            this.router('home');
             return true;
         };
 
@@ -2383,7 +2339,7 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 3 * 1024 * 1024;
+        const videoLimit = 800 * 1024;
         let hasLargeVideo = false;
         let hasMediumVideo = false;
         if (filesInput.files.length > 0) {
@@ -2403,7 +2359,7 @@ class ForumApp {
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
-                            if (file.size > 1.5 * 1024 * 1024) {
+                            if (file.size > 400 * 1024) {
                                 hasMediumVideo = true;
                             }
                         } else {
@@ -2446,27 +2402,27 @@ class ForumApp {
             const sizeMB = (jsonStr.length / 1024 / 1024);
             console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB');
 
-            const realLimit = 2 * 1024 * 1024;
-            const warnLimit = 4 * 1024 * 1024;
-            const hardLimit = 5 * 1024 * 1024;
+            const realLimit = 800 * 1024;
+            const warnLimit = 1000 * 1024;
+            const hardLimit = 1200 * 1024;
 
             let willPublish = jsonStr.length <= hardLimit;
             let publishConfirmMsg = '';
 
             if (hasLargeVideo) {
-                publishConfirmMsg += '⚠️ 部分视频超过3MB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
+                publishConfirmMsg += '⚠️ 部分视频超过 800KB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
             }
 
             if (hasMediumVideo || jsonStr.length > realLimit) {
-                publishConfirmMsg += '⚠️ 视频较大 (' + sizeMB.toFixed(2) + 'MB)！\n\n免费服务器有限制，超过 2MB 的视频可能发不出去。\n\n建议：\n1. 视频控制在 30 秒以内\n2. 用低分辨率拍摄\n3. 或直接发截图代替视频\n\n';
+                publishConfirmMsg += '⚠️ 帖子内容较大 (' + sizeMB.toFixed(2) + 'MB)！\n\n免费服务器消息大小有限制，超过 1MB 的内容可能发不出去。\n\n建议：\n1. 视频控制在 15-30 秒以内\n2. 用低分辨率拍摄\n3. 或直接发图片代替视频\n\n';
             }
 
             if (jsonStr.length > warnLimit && jsonStr.length <= hardLimit) {
-                publishConfirmMsg += '🚨 警告：帖子内容非常大！\n（' + sizeMB.toFixed(2) + 'MB，超过 4MB）\n\n免费服务器很可能拒绝这个消息。\n建议只发短小视频或图片。\n\n';
+                publishConfirmMsg += '🚨 警告：内容非常大！\n（' + sizeMB.toFixed(2) + 'MB，接近 1.2MB 上限）\n\n服务器很可能拒绝这个消息，别人收不到。\n\n';
             }
 
             if (!willPublish) {
-                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 5MB 无法发送。\n\n请用更短更小的视频，或只发图片。');
+                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 1.2MB 无法发送。\n\n请用更短更小的视频，或只发图片。');
                 return;
             }
 
@@ -2529,7 +2485,7 @@ class ForumApp {
         });
     }
 
-    async compressImage(file, maxSize = 1024, quality = 0.7) {
+    async compressImage(file, maxSize = 600, quality = 0.6) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -2551,8 +2507,22 @@ class ForumApp {
                     canvas.height = height;
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, width, height);
-                    const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-                    resolve(canvas.toDataURL(mimeType, quality));
+                    let result = canvas.toDataURL('image/jpeg', quality);
+                    let currentSize = Math.round(result.length / 1024);
+                    if (currentSize > 200) {
+                        result = canvas.toDataURL('image/jpeg', 0.4);
+                        currentSize = Math.round(result.length / 1024);
+                    }
+                    if (currentSize > 150) {
+                        const smallCanvas = document.createElement('canvas');
+                        const scale = width > 480 ? 480 / width : 1;
+                        smallCanvas.width = Math.round(width * scale);
+                        smallCanvas.height = Math.round(height * scale);
+                        const smallCtx = smallCanvas.getContext('2d');
+                        smallCtx.drawImage(canvas, 0, 0, smallCanvas.width, smallCanvas.height);
+                        result = smallCanvas.toDataURL('image/jpeg', 0.5);
+                    }
+                    resolve(result);
                 };
                 img.onerror = reject;
                 img.src = e.target.result;
@@ -2898,8 +2868,6 @@ class ForumApp {
             console.log('💬 收到新聊天消息:', isFromMe ? '我发送的' : '来自 ' + otherUser.nickname, msgData.content ? msgData.content.substring(0, 50) : '[图片/语音/视频]');
             if (this.currentPage === 'chat') {
                 this.refreshChatUI(otherId);
-            } else {
-                this.renderCurrentPage();
             }
         }
     }
@@ -2939,16 +2907,16 @@ class ForumApp {
             const chatJsonStr = JSON.stringify({ type: 'chat_message', data: msgData });
             const chatSizeMB = (chatJsonStr.length / 1024 / 1024).toFixed(2);
             console.log('📤 聊天消息大小:', chatSizeMB, 'MB', '类型:', mediaType);
-            if (chatJsonStr.length > 2 * 1024 * 1024 && chatJsonStr.length <= 4 * 1024 * 1024) {
-                alert('⚠️ 消息较大 (' + chatSizeMB + 'MB)，免费服务器有限制\n超过 2MB 的内容可能发不出去');
+            if (chatJsonStr.length > 800 * 1024 && chatJsonStr.length <= 1000 * 1024) {
+                alert('⚠️ 消息较大 (' + chatSizeMB + 'MB)，服务器有限制\n可能发不出去');
             }
-            if (chatJsonStr.length > 4 * 1024 * 1024 && chatJsonStr.length <= 5 * 1024 * 1024) {
-                if (!confirm('🚨 消息非常大 (' + chatSizeMB + 'MB)！\n\n免费服务器很可能拒绝这个消息。\n是否仍然发送？')) {
+            if (chatJsonStr.length > 1000 * 1024 && chatJsonStr.length <= 1200 * 1024) {
+                if (!confirm('🚨 消息非常大 (' + chatSizeMB + 'MB)！\n\n服务器很可能拒绝这个消息。\n是否仍然发送？')) {
                     return;
                 }
             }
-            if (chatJsonStr.length > 5 * 1024 * 1024) {
-                alert('❌ 消息超过 5MB，无法发送。\n请用更短更小的视频，或发截图代替');
+            if (chatJsonStr.length > 1200 * 1024) {
+                alert('❌ 消息超过 1.2MB，无法发送。\n请用更短更小的视频，或发截图代替');
                 return;
             }
         } catch (e) {
@@ -3035,17 +3003,14 @@ class ForumApp {
                         const base64 = await this.compressImage(file);
                         this.sendChatMessage(friendId, '', 'image', base64);
                     } else if (file.type.startsWith('video/')) {
-                        if (file.size <= 3 * 1024 * 1024) {
+                        if (file.size <= 800 * 1024) {
                             console.log('💬 处理聊天视频:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
                             const base64 = await this.fileToBase64(file);
                             this.sendChatMessage(friendId, '', 'video', base64);
-                            if (file.size > 1.5 * 1024 * 1024) {
-                                alert('⚠️ 视频较大，免费服务器有限制\n超过 2MB 的内容可能发不出去');
-                            }
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             this.sendChatMessage(friendId, '', 'video', thumb);
-                            alert('视频超过 3MB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
+                            alert('视频超过 800KB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
                         }
                     }
                 } catch (err) {
@@ -3264,7 +3229,6 @@ class ForumApp {
         }
         if (changed) {
             this.saveLocalData();
-            this.renderCurrentPage();
             if (statusChanged && req.status === 'accepted' && oldStatus !== 'accepted') {
                 const otherId = req.from === this.currentUser?.id ? req.to : req.from;
                 const otherUser = this.users[otherId] || { nickname: otherId };
