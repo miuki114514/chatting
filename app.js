@@ -915,7 +915,58 @@ class ForumApp {
             case 'home': main.innerHTML = this.renderHome(); this.attachHomeEvents(); break;
             case 'explore': main.innerHTML = this.renderExplore(); break;
             case 'favorites': main.innerHTML = this.renderFavorites(); break;
-            case 'login': main.innerHTML = this.renderLogin(); break;
+            case 'login':
+                main.innerHTML = this.renderLogin();
+                if (!this.client || !this.connected) {
+                    try {
+                        this.connectMQTT(() => {
+                            const statusEl = document.getElementById('login-status-text');
+                            if (statusEl) statusEl.textContent = '✅ 服务器已连接，可以登录了';
+                            const statusBox = document.getElementById('login-status');
+                            if (statusBox) {
+                                statusBox.style.background = '#f0fdf4';
+                                statusBox.style.borderColor = '#86efac';
+                                statusBox.style.color = '#16a34a';
+                            }
+                        });
+                    } catch (e) {
+                        const statusEl = document.getElementById('login-status-text');
+                        if (statusEl) statusEl.textContent = '⚠️ 连接中...正在重试';
+                    }
+                    let loginCheckCount = 0;
+                    const loginCheckInterval = setInterval(() => {
+                        loginCheckCount++;
+                        if (loginCheckCount > 20) {
+                            clearInterval(loginCheckInterval);
+                            return;
+                        }
+                        const statusEl = document.getElementById('login-status-text');
+                        const statusBox = document.getElementById('login-status');
+                        if (!statusEl || !statusBox) {
+                            clearInterval(loginCheckInterval);
+                            return;
+                        }
+                        if (this.connected) {
+                            statusEl.textContent = '✅ 服务器已连接，可以登录了（已同步 ' + Object.keys(this.users).length + ' 个账号）';
+                            statusBox.style.background = '#f0fdf4';
+                            statusBox.style.borderColor = '#86efac';
+                            statusBox.style.color = '#16a34a';
+                            clearInterval(loginCheckInterval);
+                        } else if (loginCheckCount > 3) {
+                            statusEl.textContent = '⏳ 正在连接服务器并同步数据...（已等待 ' + loginCheckCount + ' 秒）';
+                        }
+                    }, 1000);
+                } else {
+                    const statusEl = document.getElementById('login-status-text');
+                    const statusBox = document.getElementById('login-status');
+                    if (statusEl && statusBox) {
+                        statusEl.textContent = '✅ 服务器已连接，可以登录了（已同步 ' + Object.keys(this.users).length + ' 个账号）';
+                        statusBox.style.background = '#f0fdf4';
+                        statusBox.style.borderColor = '#86efac';
+                        statusBox.style.color = '#16a34a';
+                    }
+                }
+                break;
             case 'pending': main.innerHTML = this.renderPending(); break;
             case 'rejected': main.innerHTML = this.renderRejected(); break;
             case 'admin': main.innerHTML = this.renderAdmin(); break;
@@ -1272,22 +1323,29 @@ class ForumApp {
                         <button class="auth-tab active" onclick="app.switchAuthTab('login')">登录</button>
                         <button class="auth-tab" onclick="app.switchAuthTab('register')">注册</button>
                     </div>
-                    <div class="disclaimer-box">
-                        <div class="disclaimer-title">⚠️ 免责声明</div>
-                        <div class="disclaimer-text">
-                            本社区为去中心化实时共享平台，所有用户发布的内容、言论及行为均由发布者本人负责，与平台开发者、运营者及服务器提供者无关。
-                            <br><br>请遵守以下准则：
-                            <div style="margin-top:8px; padding-left:12px; line-height:1.8;">
-                                1. 不发布违法、违规、侵权、诈骗内容<br>
-                                2. 不传播谣言、暴力、色情等不良信息<br>
-                                3. 尊重他人隐私，不进行人身攻击<br>
-                                4. 所有私聊记录仅保存在你自己的设备上<br>
-                                5. 你的账号信息、发帖、私聊记录可能与其他在线用户同步
-                            </div>
-                            <br><strong>使用本平台即表示你同意自行承担所有行为的后果和法律责任。</strong>
+
+                    <div class="backup-login-card" style="margin:12px 0;padding:16px;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);color:white;border-radius:12px;box-shadow:0 4px 12px rgba(102,126,234,0.3);">
+                        <div style="font-weight:bold;font-size:1.05rem;margin-bottom:6px;">📱 换了新设备？用账号备份登录</div>
+                        <div style="font-size:0.85rem;opacity:0.95;margin-bottom:12px;line-height:1.5;">
+                            即使原设备关机、断网，也能用备份码直接登录。<br>
+                            在原设备登录 → 我的主页 → 导出账号备份 → 复制到这里
+                        </div>
+                        <button onclick="app.toggleAccountImport()" class="btn btn-block" style="background:white;color:#667eea;border:none;font-weight:bold;padding:10px 16px;border-radius:8px;cursor:pointer;">
+                            ${document.getElementById('account-import-form-display') === 'block' ? '收起' : '📋 点击这里输入备份码'}
+                        </button>
+                        <div id="account-import-form" style="display:none;margin-top:12px;padding:14px;background:rgba(255,255,255,0.95);border-radius:8px;color:#334155;">
+                            <label style="display:block;font-size:0.85rem;color:#475569;margin-bottom:8px;font-weight:500;">👇 粘贴账号备份码</label>
+                            <textarea id="account-import-code" rows="5" placeholder="粘贴从原设备复制的账号备份码..." style="width:100%;padding:10px;border:2px solid #cbd5e1;border-radius:8px;font-family:monospace;font-size:0.75rem;box-sizing:border-box;"></textarea>
+                            <button onclick="app.importAccount()" class="btn btn-primary btn-block" style="margin-top:10px;background:#667eea;border:none;padding:12px;font-weight:bold;">✨ 导入并立即登录</button>
+                            <button onclick="app.hideAccountImport()" class="btn btn-secondary btn-block" style="margin-top:6px;background:transparent;color:#64748b;border:1px solid #cbd5e1;">取消</button>
                         </div>
                     </div>
+
+                    <div id="login-status" class="login-status" style="margin:12px 0;padding:12px 16px;background:#f0f5f9;border:1px solid #afc8da;border-radius:8px;font-size:0.9rem;color:#47709B;text-align:center;">
+                        <span id="login-status-text">📡 正在连接服务器，请稍候...</span>
+                    </div>
                     <div id="login-form">
+                        <div style="text-align:center;color:#64748b;font-size:0.85rem;margin-bottom:8px;">— 或者用用户名密码登录 —</div>
                         <div class="form-group">
                             <label>用户名</label>
                             <input type="text" id="login-username" placeholder="输入用户名">
@@ -1297,6 +1355,9 @@ class ForumApp {
                             <input type="password" id="login-password" placeholder="输入密码">
                         </div>
                         <button onclick="app.login()" class="btn btn-primary btn-block">登录</button>
+                        <div style="margin-top:10px;font-size:0.8rem;color:#94a3b8;text-align:center;line-height:1.5;">
+                            💡 提示：如果登录失败，请使用上方的<span style="color:#667eea;font-weight:500;">账号备份</span>方式
+                        </div>
                     </div>
                     <div id="register-form" style="display:none">
                         <div class="form-group">
@@ -1408,7 +1469,11 @@ class ForumApp {
                             ${user.hideProfile ? '<span style="margin-left:12px;color:#f59e0b;">🔒 已隐藏</span>' : ''}
                         </div>
                     </div>
-                    ${isMe ? `<button onclick="app.openProfileEdit()" class="btn btn-secondary">✏️ 编辑主页</button>` : this.renderProfileActionBtn(userId)}
+                    ${isMe ? `
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <button onclick="app.openProfileEdit()" class="btn btn-secondary">✏️ 编辑主页</button>
+                            <button onclick="app.exportAccount()" class="btn btn-secondary" style="background:#e0e7ff;color:#3730a3;">📋 导出账号备份</button>
+                        </div>` : this.renderProfileActionBtn(userId)}
                 </div>
                 <div class="profile-posts">
                     <h3>📰 发布的帖子</h3>
@@ -1767,43 +1832,243 @@ class ForumApp {
 
         if (!username || !password) return alert('请填写完整信息');
 
-        const user = Object.values(this.users).find(u => u.username === username && u.password === password);
-        if (!user) return alert('用户名或密码错误');
+        const tryLogin = () => {
+            const user = Object.values(this.users).find(u => u.username === username && u.password === password);
+            if (!user) return false;
 
-        this.currentUser = { id: user.id, username: user.username, nickname: user.nickname };
-        localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
-        this.updateUserUI();
+            this.currentUser = { id: user.id, username: user.username, nickname: user.nickname };
+            localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
+            this.updateUserUI();
 
-        try {
-            this.connectMQTT();
-        } catch (e) {
-            console.error('登录后 MQTT 连接失败:', e);
+            try {
+                this.connectMQTT(() => {
+                    this.publish(`forum/users/${user.id}`, { type: 'user', data: this.users[user.id] }, true);
+                });
+            } catch (e) {
+                console.error('登录后 MQTT 连接失败:', e);
+            }
+
+            setTimeout(() => {
+                const latestUser = this.users[user.id];
+                if (latestUser && latestUser.banned) {
+                    alert('你已被管理员封禁，无法登录。');
+                    this.currentUser = null;
+                    localStorage.removeItem('currentUser');
+                    this.router('home');
+                    return;
+                }
+                if (latestUser && latestUser.role === 'rejected') {
+                    alert('❌ 你的注册申请未通过审核，无法登录。');
+                    this.currentUser = null;
+                    localStorage.removeItem('currentUser');
+                    this.router('home');
+                    return;
+                }
+                if (latestUser && latestUser.role === 'pending') {
+                    alert('⏳ 你的账号正在等待管理员审核。\n\n已登录并连接服务器，保持页面打开，审核通过后会自动刷新。');
+                    this.router('home');
+                    return;
+                }
+                this.publish(`forum/users/${user.id}`, { type: 'user', data: latestUser }, true);
+                alert('✅ 登录成功！欢迎回来，' + (latestUser.nickname || latestUser.username));
+                this.router('home');
+            }, 2500);
+            return true;
+        };
+
+        if (tryLogin()) return;
+
+        alert('⏳ 正在从服务器同步账号数据...\n\n请稍候。\n\n💡 如果多次失败，请使用页面上方的"账号备份登录"功能。');
+
+        if (!this.client || !this.connected) {
+            try {
+                this.connectMQTT();
+            } catch (e) {
+                console.error('登录时 MQTT 连接失败:', e);
+            }
         }
 
-        setTimeout(() => {
-            const latestUser = this.users[user.id];
-            if (latestUser && latestUser.banned) {
-                alert('你已被管理员封禁，无法登录。');
-                this.currentUser = null;
-                localStorage.removeItem('currentUser');
-                this.router('home');
+        let attempts = 0;
+        const maxAttempts = 8;
+        const retryInterval = setInterval(() => {
+            attempts++;
+            if (attempts >= maxAttempts) {
+                clearInterval(retryInterval);
+                const user = Object.values(this.users).find(u => u.username === username);
+                if (user) {
+                    alert('❌ 密码错误！请重新输入。\n\n💡 忘记密码？请使用原设备登录后重置，或使用账号备份码登录。');
+                } else {
+                    const showBackup = confirm('❌ 没有找到这个账号！\n\n可能原因：\n1. 用户名输入错误\n2. 原设备已经很久没上线了，账号数据没有保存在服务器\n3. MQTT 服务器暂时不可用\n\n建议：使用页面上方的"📱 账号备份登录"功能\n\n点击"确定"按钮立即切换到备份登录方式');
+                    if (showBackup) {
+                        const form = document.getElementById('account-import-form');
+                        if (form) {
+                            form.style.display = 'block';
+                            form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    }
+                }
                 return;
             }
-            if (latestUser && latestUser.role === 'rejected') {
-                alert('❌ 你的注册申请未通过审核，无法登录。');
-                this.currentUser = null;
-                localStorage.removeItem('currentUser');
-                this.router('home');
+            if (tryLogin()) {
+                clearInterval(retryInterval);
+            } else {
+                console.log('🔄 登录重试 ' + attempts + '/' + maxAttempts + ', 当前用户数: ' + Object.keys(this.users).length);
+            }
+        }, 1500);
+    }
+
+    toggleAccountImport() {
+        const form = document.getElementById('account-import-form');
+        if (form) {
+            form.style.display = form.style.display === 'block' ? 'none' : 'block';
+        }
+    }
+
+    showAccountImport() {
+        const form = document.getElementById('account-import-form');
+        if (form) form.style.display = 'block';
+    }
+
+    hideAccountImport() {
+        const form = document.getElementById('account-import-form');
+        if (form) form.style.display = 'none';
+    }
+
+    exportAccount() {
+        if (!this.currentUser) {
+            alert('请先登录');
+            return;
+        }
+        const user = this.users[this.currentUser.id];
+        if (!user) {
+            alert('找不到用户数据');
+            return;
+        }
+        const exportData = {
+            v: 1,
+            id: user.id,
+            username: user.username,
+            nickname: user.nickname,
+            password: user.password,
+            role: user.role,
+            avatar: user.avatar,
+            bio: user.bio,
+            theme: user.theme,
+            bgColor: user.bgColor,
+            approvedBy: user.approvedBy,
+            approvedAt: user.approvedAt,
+            updatedAt: Date.now()
+        };
+        try {
+            const jsonStr = JSON.stringify(exportData);
+            const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+            const header = '=== XFA ACCOUNT BACKUP ===\n';
+            const footer = '\n=== END ===';
+            const formatted = header + b64.match(/.{1,60}/g).join('\n') + footer;
+
+            const exportCard = document.createElement('div');
+            exportCard.id = 'account-export-modal';
+            exportCard.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px;';
+            exportCard.innerHTML = `
+                <div style="background:white;border-radius:16px;padding:20px;max-width:500px;width:100%;max-height:90vh;overflow-y:auto;">
+                    <div style="font-size:1.1rem;font-weight:bold;margin-bottom:8px;color:#334155;">📋 你的账号备份码</div>
+                    <div style="font-size:0.85rem;color:#64748b;margin-bottom:12px;line-height:1.6;">
+                        请完整复制下方文字，发送到新设备粘贴即可登录。<br>
+                        <span style="color:#dc2626;">⚠️ 不要发给其他人！包含密码</span>
+                    </div>
+                    <textarea id="backup-code-display" readonly style="width:100%;padding:10px;border:2px solid #cbd5e1;border-radius:8px;font-family:monospace;font-size:0.7rem;min-height:200px;box-sizing:border-box;">${formatted}</textarea>
+                    <div style="display:flex;gap:8px;margin-top:12px;">
+                        <button onclick="app.copyBackupCode()" style="flex:1;padding:12px;background:#667eea;color:white;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:0.9rem;">📋 一键复制</button>
+                        <button onclick="app.closeExportModal()" style="padding:12px 20px;background:#f1f5f9;color:#334155;border:none;border-radius:8px;cursor:pointer;font-size:0.9rem;">关闭</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(exportCard);
+        } catch (e) {
+            console.error('导出账号失败:', e);
+            alert('导出失败: ' + e.message);
+        }
+    }
+
+    copyBackupCode() {
+        const textarea = document.getElementById('backup-code-display');
+        if (!textarea) return;
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        try {
+            document.execCommand('copy');
+            alert('✅ 已复制到剪贴板！\n\n现在可以发送到新设备粘贴登录。');
+        } catch (e) {
+            alert('自动复制失败，请手动长按选择全部文字复制。');
+        }
+    }
+
+    closeExportModal() {
+        const modal = document.getElementById('account-export-modal');
+        if (modal) modal.remove();
+    }
+
+    importAccount() {
+        const codeInput = document.getElementById('account-import-code');
+        if (!codeInput) return;
+        const rawCode = codeInput.value.trim();
+        if (!rawCode) {
+            alert('请粘贴账号备份码');
+            return;
+        }
+        try {
+            let b64 = rawCode
+                .replace(/=*=* XFA ACCOUNT BACKUP =*=*/g, '')
+                .replace(/=*=* END =*=*/g, '')
+                .replace(/\s+/g, '');
+            const jsonStr = decodeURIComponent(escape(atob(b64)));
+            const data = JSON.parse(jsonStr);
+            if (!data || !data.id || !data.username || !data.password) {
+                alert('备份码格式错误，请确认内容完整');
                 return;
             }
-            if (latestUser && latestUser.role === 'pending') {
-                alert('⏳ 你的账号正在等待管理员审核。\n\n已登录并连接服务器，保持页面打开，审核通过后会自动刷新。');
-                this.router('home');
-                return;
+            const existingUser = this.users[data.id];
+            if (existingUser) {
+                if (!confirm('本设备已有此账号数据，是否用备份中的数据覆盖？')) {
+                    return;
+                }
             }
-            alert('✅ 登录成功！');
-            this.router('home');
-        }, 2500);
+            const userData = {
+                id: data.id,
+                username: data.username,
+                nickname: data.nickname,
+                password: data.password,
+                role: data.role || 'user',
+                banned: false,
+                avatar: data.avatar || '👤',
+                bio: data.bio || '',
+                theme: data.theme || 'default',
+                bgColor: data.bgColor || '#f5f5f5',
+                approvedBy: data.approvedBy || null,
+                approvedAt: data.approvedAt || null,
+                hideProfile: data.hideProfile || false,
+                updatedAt: Date.now()
+            };
+            this.users[data.id] = userData;
+            this.saveLocalData();
+            this.currentUser = { id: data.id, username: data.username, nickname: data.nickname };
+            localStorage.setItem('currentUser', JSON.stringify(this.currentUser));
+            try {
+                this.connectMQTT(() => {
+                    this.publish(`forum/users/${data.id}`, { type: 'user', data: userData }, true);
+                });
+            } catch (e) {
+                console.error('连接 MQTT 失败:', e);
+            }
+            setTimeout(() => {
+                this.updateUserUI();
+                alert('✅ 账号导入成功！欢迎回来，' + data.nickname);
+                this.router('home');
+            }, 1000);
+        } catch (e) {
+            console.error('导入失败:', e);
+            alert('❌ 导入失败：备份码格式不正确或已损坏\n\n请确保复制了完整的备份码内容。');
+        }
     }
 
     logout() {
@@ -2088,8 +2353,8 @@ class ForumApp {
             let warn = '';
             if (f.type.startsWith('video/')) {
                 icon = '🎬';
-                if (f.size > 1.5 * 1024 * 1024) {
-                    warn = ' <span style="color:#f59e0b">(超过1.5MB，将转为缩略图)</span>';
+                if (f.size > 512 * 1024) {
+                    warn = ' <span style="color:#f59e0b">(超过512KB，将转为缩略图发布)</span>';
                 } else {
                     warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
                 }
@@ -2116,14 +2381,15 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 1.5 * 1024 * 1024;
+        const videoLimit = 512 * 1024;
+        let hasLargeVideo = false;
         if (filesInput.files.length > 0) {
             let totalRawSize = 0;
             for (const file of filesInput.files) {
                 totalRawSize += file.size;
             }
-            if (totalRawSize > 3 * 1024 * 1024) {
-                alert('⚠️ 文件总大小超过 3MB，可能无法发送给其他用户。\n建议：使用更小的视频或截图。');
+            if (totalRawSize > 1 * 1024 * 1024) {
+                alert('⚠️ 文件总大小超过 1MB，可能无法发送给其他用户。\n建议：使用更小的视频或截图。');
             }
             for (const file of filesInput.files) {
                 if (file.type.startsWith('image/')) {
@@ -2144,7 +2410,7 @@ class ForumApp {
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             mediaFiles.push(thumb);
-                            alert(`视频 ${file.name} 超过 1.5MB，已转为缩略图发布\n（完整视频太大，其他用户无法接收）`);
+                            hasLargeVideo = true;
                         }
                     } catch (e) {
                         console.error('视频处理失败:', e);
@@ -2181,12 +2447,29 @@ class ForumApp {
             const sizeMB = (jsonStr.length / 1024 / 1024);
             console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB');
 
-            const realLimit = 2 * 1024 * 1024;
+            const realLimit = 1.2 * 1024 * 1024;
+            const hardLimit = 2 * 1024 * 1024;
 
-            let willPublish = jsonStr.length <= realLimit;
+            let willPublish = jsonStr.length <= hardLimit;
+            let publishConfirmMsg = '';
+
+            if (hasLargeVideo) {
+                publishConfirmMsg += '⚠️ 部分视频超过512KB，已转为缩略图发布（其他用户只能看到截图，不能播放视频）\n\n';
+            }
+
+            if (jsonStr.length > realLimit && jsonStr.length <= hardLimit) {
+                publishConfirmMsg += '⚠️ 警告：帖子内容较大 (' + sizeMB.toFixed(2) + 'MB)！\n超过 1.2MB 后其他用户可能收不到。\n\n建议：\n1. 只用更小的视频（5秒以内的短视频）\n2. 只发图片，不要视频\n\n';
+            }
 
             if (!willPublish) {
-                alert('⚠️ 警告：帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 2MB 后其他用户大概率收不到。\n\n建议：\n1. 只用更小的视频（15秒以内的短视频）\n2. 只发图片，不要视频\n3. 发文字内容少的帖子\n\n是否仍然尝试发布？（可能会尝试发布但不保证成功）');
+                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 2MB 无法发送。\n\n请用更小的视频或只发图片。');
+                return;
+            }
+
+            if (publishConfirmMsg) {
+                if (!confirm(publishConfirmMsg + '\n是否仍然发布？')) {
+                    return;
+                }
             }
 
             this.publish(`forum/posts/${postId}`, { type: 'post', data: postData }, true, (err) => {
@@ -2652,13 +2935,22 @@ class ForumApp {
             const chatJsonStr = JSON.stringify({ type: 'chat_message', data: msgData });
             const chatSizeMB = (chatJsonStr.length / 1024 / 1024).toFixed(2);
             console.log('📤 聊天消息大小:', chatSizeMB, 'MB', '类型:', mediaType);
+            if (chatJsonStr.length > 1.5 * 1024 * 1024) {
+                alert('⚠️ 消息过大 (' + chatSizeMB + 'MB)，可能对方收不到。\n建议使用更小的视频（5秒以内）或只发图片');
+            }
             if (chatJsonStr.length > 2 * 1024 * 1024) {
-                alert('⚠️ 消息过大 (' + chatSizeMB + 'MB)，可能对方收不到。\n建议使用更小的视频（15秒以内）');
+                alert('❌ 消息超过 2MB，无法发送。\n请用更小的视频或截图代替');
+                return;
             }
         } catch (e) {
             console.warn('计算聊天消息大小失败:', e);
         }
-        this.publish(`forum/msg/${toUserId}/${msgId}`, { type: 'chat_message', data: msgData }, true);
+        this.publish(`forum/msg/${toUserId}/${msgId}`, { type: 'chat_message', data: msgData }, true, (err) => {
+            if (err) {
+                console.error('聊天消息发送失败:', err);
+                alert('❌ 消息发送失败: 内容太大，对方收不到');
+            }
+        });
         this.publish(`forum/msg/${this.currentUser.id}/${msgId}`, { type: 'chat_message', data: msgData }, true);
         const toUser = this.users[toUserId] || { nickname: toUserId };
         console.log('📤 发送聊天消息给:', toUser.nickname, '内容:', msgData.content ? msgData.content.substring(0, 50) : '[图片/语音/视频]');
@@ -2734,14 +3026,14 @@ class ForumApp {
                         const base64 = await this.compressImage(file);
                         this.sendChatMessage(friendId, '', 'image', base64);
                     } else if (file.type.startsWith('video/')) {
-                        if (file.size <= 1.5 * 1024 * 1024) {
+                        if (file.size <= 512 * 1024) {
                             console.log('💬 处理聊天视频:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
                             const base64 = await this.fileToBase64(file);
                             this.sendChatMessage(friendId, '', 'video', base64);
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             this.sendChatMessage(friendId, '', 'video', thumb);
-                            alert('视频超过 1.5MB，已转为缩略图发送\n（完整视频对方收不到）');
+                            alert('视频超过 512KB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
                         }
                     }
                 } catch (err) {
