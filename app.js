@@ -45,15 +45,23 @@ class ForumApp {
         const hasPendingUser = Object.values(this.users).some(u => u.role === 'pending');
 
         if (this.currentUser) {
-            try {
-                this.connectMQTT();
-            } catch (e) {
-                console.error('MQTT 连接失败:', e);
-            }
-            try {
-                this.router('home');
-            } catch (e) {
-                console.error('页面渲染失败:', e);
+            const fullUser = this.users[this.currentUser.id];
+            if (fullUser && fullUser.role === 'pending') {
+                this.currentUser = null;
+                localStorage.removeItem('currentUser');
+                console.log('当前用户为 pending 状态，清除登录状态');
+                this.router('login');
+            } else {
+                try {
+                    this.connectMQTT();
+                } catch (e) {
+                    console.error('MQTT 连接失败:', e);
+                }
+                try {
+                    this.router('home');
+                } catch (e) {
+                    console.error('页面渲染失败:', e);
+                }
             }
         } else {
             if (hasPendingUser) {
@@ -879,6 +887,13 @@ class ForumApp {
         }
         if (this.currentUser && this.users[this.currentUser.id]) {
             const fullUser = this.users[this.currentUser.id];
+            if (fullUser.role === 'pending') {
+                this.currentUser = null;
+                localStorage.removeItem('currentUser');
+                alert('⏳ 你的账号正在等待管理员审核。\n\n审核通过后才能访问。');
+                main.innerHTML = this.renderLogin();
+                return;
+            }
             if (fullUser.role === 'rejected' || fullUser.banned) {
                 this.currentUser = null;
                 localStorage.removeItem('currentUser');
@@ -2318,10 +2333,8 @@ class ForumApp {
             let warn = '';
             if (f.type.startsWith('video/')) {
                     icon = '🎬';
-                    if (f.size > 3 * 1024 * 1024) {
-                        warn = ' <span style="color:#ef4444">(超过3MB，将转为缩略图发布)</span>';
-                    } else if (f.size > 1.5 * 1024 * 1024) {
-                        warn = ' <span style="color:#f59e0b">(较大，免费服务器可能拒绝)</span>';
+                    if (f.size > 1 * 1024 * 1024) {
+                        warn = ' <span style="color:#ef4444">(超过1MB，将转为缩略图)</span>';
                     } else {
                         warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
                     }
@@ -2348,7 +2361,7 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 500 * 1024;
+        const videoLimit = 1 * 1024 * 1024;
         let hasLargeVideo = false;
         let hasMediumVideo = false;
         if (filesInput.files.length > 0) {
@@ -2368,7 +2381,7 @@ class ForumApp {
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
-                            if (file.size > 500 * 1024) {
+                            if (file.size > 700 * 1024) {
                                 hasMediumVideo = true;
                             }
                         } else {
@@ -2398,40 +2411,33 @@ class ForumApp {
             updatedAt: Date.now()
         };
 
-        this.posts.push(postData);
-        try {
-            this.saveLocalData();
-        } catch (e) {
-            alert('⚠️ 本地存储空间不足，部分媒体文件可能无法保存到本地');
-            console.error('本地保存失败:', e);
-        }
-
         try {
             const jsonStr = JSON.stringify({ type: 'post', data: postData });
             const sizeMB = (jsonStr.length / 1024 / 1024);
-            console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB');
+            const sizeKB = jsonStr.length / 1024;
+            console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB,', sizeKB.toFixed(1), 'KB');
 
-            const realLimit = 600 * 1024;
-            const warnLimit = 800 * 1024;
-            const hardLimit = 900 * 1024;
+            const realLimit = 800 * 1024;
+            const warnLimit = 1 * 1024 * 1024;
+            const hardLimit = 1.2 * 1024 * 1024;
 
             let willPublish = jsonStr.length <= hardLimit;
             let publishConfirmMsg = '';
 
             if (hasLargeVideo) {
-                publishConfirmMsg += '⚠️ 部分视频超过 500KB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
+                publishConfirmMsg += '⚠️ 部分视频超过 1MB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
             }
 
             if (hasMediumVideo || jsonStr.length > realLimit) {
-                publishConfirmMsg += '⚠️ 帖子内容较大 (' + sizeMB.toFixed(2) + 'MB)！\n\n免费服务器消息大小有限制，超过 600KB 的内容可能发不出去。\n\n建议：\n1. 视频控制在 15 秒以内\n2. 用低分辨率拍摄\n3. 或直接发图片代替视频\n\n';
+                publishConfirmMsg += '⚠️ 帖子内容较大 (' + sizeKB.toFixed(1) + 'KB)！\n\n免费服务器消息大小有限制，超过 800KB 的内容可能发不出去。\n\n建议：\n1. 视频控制在 30 秒以内\n2. 用低分辨率拍摄\n3. 或直接发图片代替视频\n\n';
             }
 
             if (jsonStr.length > warnLimit && jsonStr.length <= hardLimit) {
-                publishConfirmMsg += '🚨 警告：内容非常大！\n（' + sizeMB.toFixed(2) + 'MB，接近 900KB 上限）\n\n服务器很可能拒绝这个消息，别人收不到。\n\n';
+                publishConfirmMsg += '🚨 警告：内容非常大！\n（' + sizeKB.toFixed(1) + 'KB，接近 1.2MB 上限）\n\n服务器很可能拒绝这个消息，别人收不到。\n\n';
             }
 
             if (!willPublish) {
-                alert('❌ 帖子内容过大 (' + sizeMB.toFixed(2) + 'MB)！\n\n超过 900KB 无法发送。\n\n请用更短更小的视频，或只发图片。');
+                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 1.2MB 无法发送。\n\n请用更短更小的视频，或只发图片。');
                 return;
             }
 
@@ -2439,6 +2445,14 @@ class ForumApp {
                 if (!confirm(publishConfirmMsg + '是否仍然发布？')) {
                     return;
                 }
+            }
+
+            this.posts.push(postData);
+            try {
+                this.saveLocalData();
+            } catch (e) {
+                alert('⚠️ 本地存储空间不足，部分媒体文件可能无法保存到本地');
+                console.error('本地保存失败:', e);
             }
 
             this.publish(`forum/posts/${postId}`, { type: 'post', data: postData }, true, (err) => {
@@ -2452,6 +2466,7 @@ class ForumApp {
         } catch (e) {
             console.error('发布异常:', e);
             alert('❌ 发布异常: ' + e.message);
+            return;
         }
 
         this.closeModal('post-modal');
@@ -2558,7 +2573,7 @@ class ForumApp {
             };
             video.onseeked = () => {
                 const canvas = document.createElement('canvas');
-                const maxSize = 640;
+                const maxSize = 320;
                 let width = video.videoWidth;
                 let height = video.videoHeight;
                 if (width > maxSize || height > maxSize) {
@@ -2573,8 +2588,10 @@ class ForumApp {
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, width, height);
                 ctx.drawImage(video, 0, 0, width, height);
-                const thumbData = canvas.toDataURL('image/jpeg', 0.8);
+                const thumbData = canvas.toDataURL('image/jpeg', 0.5);
                 video.src = '';
                 resolve(thumbData);
             };
@@ -3020,14 +3037,14 @@ class ForumApp {
                         const base64 = await this.compressImage(file);
                         this.sendChatMessage(friendId, '', 'image', base64);
                     } else if (file.type.startsWith('video/')) {
-                        if (file.size <= 500 * 1024) {
+                        if (file.size <= 1 * 1024 * 1024) {
                             console.log('💬 处理聊天视频:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
                             const base64 = await this.fileToBase64(file);
                             this.sendChatMessage(friendId, '', 'video', base64);
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             this.sendChatMessage(friendId, '', 'video', thumb);
-                            alert('视频超过 500KB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
+                            alert('视频超过 1MB，已转为缩略图发送\n（完整视频太大对方收不到，请用更短的视频或截图）');
                         }
                     }
                 } catch (err) {
