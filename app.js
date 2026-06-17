@@ -444,7 +444,7 @@ class ForumApp {
     publishAllDataAsRetained() {
         if (!this.connected || !this.client) return;
         try {
-            let userCount = 0, frCount = 0;
+            let userCount = 0, frCount = 0, postCount = 0, postSkipped = 0;
             Object.values(this.users).forEach(user => {
                 if (user && user.id) {
                     this.publish(`forum/users/${user.id}`, { type: 'user', data: user }, true);
@@ -453,7 +453,7 @@ class ForumApp {
             });
             this.friendRequests.forEach(fr => {
                 if (fr && fr.id) {
-                    if (fr.status === 'accepted' || fr.status === 'rejected') {
+                    if (fr.status === 'accepted' || fr.status === 'rejected' || fr.status === 'pending') {
                         const targetId = fr.from === this.currentUser?.id ? fr.to : fr.from;
                         if (targetId) {
                             this.publish(`forum/friends/${targetId}`, { type: 'friendRequest', data: fr }, true);
@@ -462,7 +462,22 @@ class ForumApp {
                     }
                 }
             });
-            console.log(`已同步: ${userCount}用户资料, ${frCount}好友申请 (帖子/评论/私信不再批量重发; pending申请避免覆盖)`);
+            this.posts.forEach(post => {
+                if (post && post.id) {
+                    try {
+                        const payload = JSON.stringify({ type: 'post', data: post });
+                        if (payload.length <= 280 * 1024) {
+                            this.publish(`forum/posts/${post.id}`, { type: 'post', data: post }, true);
+                            postCount++;
+                        } else {
+                            postSkipped++;
+                        }
+                    } catch (e) {
+                        postSkipped++;
+                    }
+                }
+            });
+            console.log(`已同步: ${userCount}用户, ${frCount}好友申请, ${postCount}帖子${postSkipped > 0 ? ' (跳过' + postSkipped + '个过大帖子)' : ''}`);
         } catch (e) {
             console.error('批量发布失败:', e);
         }
@@ -480,6 +495,7 @@ class ForumApp {
     handleMessage(payload) {
         switch (payload.type) {
             case 'post':
+            case 'post_state':
                 this.mergePost(payload.data);
                 break;
             case 'comment':
@@ -566,15 +582,23 @@ class ForumApp {
             const newTimestamp = post.updatedAt || post.timestamp || 0;
             const oldTimestamp = existing.updatedAt || existing.timestamp || 0;
             if (newTimestamp >= oldTimestamp) {
-                this.posts[existingIdx] = post;
-                changed = true;
-                if (existing.isPinned !== post.isPinned) {
+                if (post._state_only) {
+                    existing.isPinned = post.isPinned;
+                    existing.updatedAt = post.updatedAt;
                     console.log('📌 收到帖子置顶状态变更:', post.id, '新状态:', post.isPinned ? '已置顶' : '未置顶');
+                } else {
+                    this.posts[existingIdx] = post;
+                    if (existing.isPinned !== post.isPinned) {
+                        console.log('📌 收到帖子置顶状态变更:', post.id, '新状态:', post.isPinned ? '已置顶' : '未置顶');
+                    }
                 }
+                changed = true;
             }
         } else {
-            this.posts.push(post);
-            changed = true;
+            if (!post._state_only) {
+                this.posts.push(post);
+                changed = true;
+            }
         }
         if (changed) {
             this.saveLocalData();
@@ -2361,8 +2385,8 @@ class ForumApp {
             let warn = '';
             if (f.type.startsWith('video/')) {
                     icon = '🎬';
-                    if (f.size > 1 * 1024 * 1024) {
-                        warn = ' <span style="color:#ef4444">(超过1MB，将转为缩略图)</span>';
+                    if (f.size > 200 * 1024) {
+                        warn = ' <span style="color:#ef4444">(超过200KB，将转为缩略图)</span>';
                     } else {
                         warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
                     }
@@ -2389,9 +2413,11 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 1 * 1024 * 1024;
+        const videoLimit = 200 * 1024;
+        const postHardLimit = 350 * 1024;
+        const postWarnLimit = 280 * 1024;
         let hasLargeVideo = false;
-        let hasMediumVideo = false;
+        let hasAnyVideo = false;
         if (filesInput.files.length > 0) {
             for (const file of filesInput.files) {
                 if (file.type.startsWith('image/')) {
@@ -2403,15 +2429,13 @@ class ForumApp {
                         alert(`图片 ${file.name} 处理失败`);
                     }
                 } else if (file.type.startsWith('video/')) {
+                    hasAnyVideo = true;
                     try {
                         if (file.size <= videoLimit) {
-                            console.log('🎬 处理视频:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+                            console.log('🎬 处理视频:', file.name, '大小:', (file.size / 1024).toFixed(0), 'KB');
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
-                            if (file.size > 700 * 1024) {
-                                hasMediumVideo = true;
-                            }
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             mediaFiles.push(thumb);
@@ -2441,31 +2465,21 @@ class ForumApp {
 
         try {
             const jsonStr = JSON.stringify({ type: 'post', data: postData });
-            const sizeMB = (jsonStr.length / 1024 / 1024);
             const sizeKB = jsonStr.length / 1024;
-            console.log('📤 帖子大小:', sizeMB.toFixed(2), 'MB,', sizeKB.toFixed(1), 'KB');
+            console.log('📤 帖子大小:', sizeKB.toFixed(1), 'KB');
 
-            const realLimit = 800 * 1024;
-            const warnLimit = 1 * 1024 * 1024;
-            const hardLimit = 1.2 * 1024 * 1024;
-
-            let willPublish = jsonStr.length <= hardLimit;
             let publishConfirmMsg = '';
 
             if (hasLargeVideo) {
-                publishConfirmMsg += '⚠️ 部分视频超过 1MB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n';
+                publishConfirmMsg += '⚠️ 部分视频超过 200KB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n提示：拍摄视频时选择最低分辨率，缩短到15秒以内，才能发布完整视频。\n\n';
             }
 
-            if (hasMediumVideo || jsonStr.length > realLimit) {
-                publishConfirmMsg += '⚠️ 帖子内容较大 (' + sizeKB.toFixed(1) + 'KB)！\n\n免费服务器消息大小有限制，超过 800KB 的内容可能发不出去。\n\n建议：\n1. 视频控制在 30 秒以内\n2. 用低分辨率拍摄\n3. 或直接发图片代替视频\n\n';
+            if (hasAnyVideo && !hasLargeVideo && sizeKB > 250) {
+                publishConfirmMsg += '⚠️ 帖子包含完整视频，大小 ' + sizeKB.toFixed(1) + 'KB\n\n免费服务器消息大小有限制，接近上限可能导致发送失败。\n\n建议：更短更小的视频，或直接发图片。\n\n';
             }
 
-            if (jsonStr.length > warnLimit && jsonStr.length <= hardLimit) {
-                publishConfirmMsg += '🚨 警告：内容非常大！\n（' + sizeKB.toFixed(1) + 'KB，接近 1.2MB 上限）\n\n服务器很可能拒绝这个消息，别人收不到。\n\n';
-            }
-
-            if (!willPublish) {
-                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 1.2MB 无法发送。\n\n请用更短更小的视频，或只发图片。');
+            if (jsonStr.length > postHardLimit) {
+                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 350KB 无法发送。\n\n请用更短更小的视频（15秒以内、最低分辨率），或只发图片。');
                 return;
             }
 
@@ -2475,20 +2489,18 @@ class ForumApp {
                 }
             }
 
-            this.posts.push(postData);
-            try {
-                this.saveLocalData();
-            } catch (e) {
-                alert('⚠️ 本地存储空间不足，部分媒体文件可能无法保存到本地');
-                console.error('本地保存失败:', e);
-            }
-
             this.publish(`forum/posts/${postId}`, { type: 'post', data: postData }, true, (err) => {
                 if (err) {
                     console.error('发布失败:', err);
-                    alert('❌ 帖子消息发送失败：内容太大，服务器拒绝了\n\n（别人收不到这个帖子，只有你自己能看到）');
+                    alert('❌ 帖子消息发送失败：服务器拒绝了\n\n（可能内容太大。提示：视频尽量短、尽量小，或直接发图片。）');
                 } else {
-                    console.log('✅ 帖子已发布到 MQTT');
+                    this.posts.push(postData);
+                    try {
+                        this.saveLocalData();
+                    } catch (e) {
+                        console.error('本地保存失败:', e);
+                    }
+                    console.log('✅ 帖子已发布');
                 }
             });
         } catch (e) {
@@ -2655,7 +2667,25 @@ class ForumApp {
             console.warn('本地保存失败:', e);
         }
         try {
-            this.publish(`forum/posts/${postId}`, { type: 'post', data: post }, true);
+            const fullPayload = JSON.stringify({ type: 'post', data: post });
+            if (fullPayload.length <= 280 * 1024) {
+                this.publish(`forum/posts/${postId}`, { type: 'post', data: post }, true);
+            } else {
+                const stateOnly = {
+                    id: post.id,
+                    isPinned: post.isPinned,
+                    updatedAt: post.updatedAt,
+                    _state_only: true,
+                    title: post.title,
+                    content: post.content,
+                    authorId: post.authorId,
+                    isAnonymous: post.isAnonymous,
+                    isAnnouncement: post.isAnnouncement,
+                    timestamp: post.timestamp
+                };
+                this.publish(`forum/posts/${postId}`, { type: 'post_state', data: stateOnly }, true);
+                console.log('📌 帖子过大，发布状态更新代替完整帖子');
+            }
         } catch (e) {
             console.warn('同步置顶状态失败:', e);
         }
