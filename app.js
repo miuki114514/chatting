@@ -466,7 +466,7 @@ class ForumApp {
                 if (post && post.id) {
                     try {
                         const payload = JSON.stringify({ type: 'post', data: post });
-                        if (payload.length <= 280 * 1024) {
+                        if (payload.length <= 700 * 1024) {
                             this.publish(`forum/posts/${post.id}`, { type: 'post', data: post }, true);
                             postCount++;
                         } else {
@@ -602,7 +602,7 @@ class ForumApp {
         }
         if (changed) {
             this.saveLocalData();
-            if (this.currentPage === 'home') {
+            if (this.currentPage === 'home' || this.currentPage === 'explore' || this.currentPage === 'profile' || this.currentPage === 'post') {
                 this.renderCurrentPage();
             }
         }
@@ -843,15 +843,57 @@ class ForumApp {
 
     sendSyncResponse(targetId) {
         this.publish(`forum/sync/response/${targetId}`, {
-            type: 'sync_response',
+            type: 'sync_summary',
             targetId: targetId,
             data: {
-                posts: this.posts,
-                comments: this.comments,
-                users: this.users,
+                postIds: this.posts.map(p => p.id),
                 deletedPostIds: this.deletedPostIds,
-                deletedCommentIds: this.deletedCommentIds
+                deletedCommentIds: this.deletedCommentIds,
+                userCount: Object.keys(this.users).length
             }
+        });
+        Object.values(this.users).forEach((user, i) => {
+            setTimeout(() => {
+                if (user && user.id) {
+                    this.publish(`forum/users/${user.id}`, { type: 'user', data: user }, true);
+                }
+            }, i * 50);
+        });
+        this.posts.forEach((post, i) => {
+            setTimeout(() => {
+                if (post && post.id) {
+                    try {
+                        const payload = JSON.stringify({ type: 'post', data: post });
+                        if (payload.length <= 700 * 1024) {
+                            this.publish(`forum/posts/${post.id}`, { type: 'post', data: post }, true);
+                        } else {
+                            const stateOnly = {
+                                id: post.id,
+                                isPinned: post.isPinned,
+                                updatedAt: post.updatedAt,
+                                _state_only: true,
+                                title: post.title,
+                                content: post.content,
+                                authorId: post.authorId,
+                                isAnonymous: post.isAnonymous,
+                                isAnnouncement: post.isAnnouncement,
+                                timestamp: post.timestamp
+                            };
+                            this.publish(`forum/posts/${post.id}`, { type: 'post_state', data: stateOnly }, true);
+                        }
+                    } catch (e) {}
+                }
+            }, i * 100);
+        });
+        this.friendRequests.forEach((fr, i) => {
+            setTimeout(() => {
+                if (fr && fr.id) {
+                    const targetId = fr.from === this.currentUser?.id ? fr.to : fr.from;
+                    if (targetId) {
+                        this.publish(`forum/friends/${targetId}`, { type: 'friendRequest', data: fr }, true);
+                    }
+                }
+            }, i * 50);
         });
     }
 
@@ -879,7 +921,16 @@ class ForumApp {
         if (data.users) {
             Object.values(data.users).forEach(u => this.mergeUser(u));
         }
+        if (data.postIds && Array.isArray(data.postIds)) {
+            const missingIds = data.postIds.filter(id => !this.posts.find(p => p.id === id) && !this.deletedPostIds.includes(id));
+            if (missingIds.length > 0) {
+                console.log('缺少帖子ID:', missingIds);
+            }
+        }
         this.saveLocalData();
+        if (this.currentPage === 'home' || this.currentPage === 'explore' || this.currentPage === 'profile') {
+            this.renderCurrentPage();
+        }
     }
 
     // ========== 路由系统 ==========
@@ -1135,7 +1186,8 @@ class ForumApp {
     }
 
     renderPostCard(post) {
-        const author = post.isAnonymous ? { nickname: '🎭 匿名用户', avatar: '👤' } : (this.users[post.authorId] || { nickname: '未知用户', avatar: '👤' });
+        const realAuthor = this.users[post.authorId] || { nickname: '未知用户', avatar: '👤' };
+        const displayAuthor = post.isAnonymous ? { nickname: '🎭 匿名用户', avatar: '👤' } : realAuthor;
         const time = this.formatTime(post.timestamp);
         const hasImage = post.images && post.images.length > 0;
         const imageUrl = hasImage ? post.images[0] : null;
@@ -1156,15 +1208,17 @@ class ForumApp {
             adminHtml += `<button class="admin-action-btn delete-btn" onclick="event.stopPropagation();app.deletePost('${post.id}')">🗑️ 删除</button>`;
             adminHtml += '</div>';
         }
-        const authorOnclick = post.isAnonymous ? '' : `onclick="event.stopPropagation();app.router('profile', {userId: '${post.authorId}'})"`;
+        const authorOnclick = post.isAnonymous && !isAdminUser ? '' : `onclick="event.stopPropagation();app.router('profile', {userId: '${post.authorId}'})"`;
+        const adminHint = (post.isAnonymous && isAdminUser) ? `<div style="font-size:0.75rem;color:#dc2626;margin-top:2px;">👁️ 管理员可见: 真实发布者 ${this.escapeHtml(realAuthor.nickname)}</div>` : '';
         return `
             <div class="post-card ${post.isAnnouncement ? 'post-card-announcement' : ''}" data-id="${post.id}">
                 <div class="post-header">
-                    <div class="post-author" ${authorOnclick} style="${post.isAnonymous ? 'cursor:default;' : ''}">
-                        <div class="author-avatar">${this.renderAvatarContent(author.avatar)}</div>
+                    <div class="post-author" ${authorOnclick} style="${post.isAnonymous && !isAdminUser ? 'cursor:default;' : ''}">
+                        <div class="author-avatar">${this.renderAvatarContent(displayAuthor.avatar)}</div>
                         <div class="author-info">
-                            <span class="author-name">${author.nickname}</span>
+                            <span class="author-name">${displayAuthor.nickname}</span>
                             <span class="post-time">${time}</span>
+                            ${adminHint}
                         </div>
                     </div>
                     ${post.isAnnouncement ? '<span class="announcement-badge">📢 公告</span>' : ''}
@@ -1566,22 +1620,26 @@ class ForumApp {
         const post = this.posts.find(p => p.id === postId);
         if (!post) return '<div class="empty-state">帖子不存在或已被删除</div>';
 
-        const author = post.isAnonymous ? { nickname: '🎭 匿名用户', avatar: '👤' } : (this.users[post.authorId] || { nickname: '未知用户', avatar: '👤' });
+        const isAdminUser = this.currentUser && this.isAdmin(this.currentUser.id);
+        const realAuthor = this.users[post.authorId] || { nickname: '未知用户', avatar: '👤' };
+        const author = post.isAnonymous ? { nickname: '🎭 匿名用户', avatar: '👤' } : realAuthor;
         const time = this.formatTime(post.timestamp);
         const postComments = this.comments.filter(c => c.postId === postId && !this.deletedCommentIds.includes(c.id)).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         const isFav = this.favorites.includes(postId);
 
-        const authorOnclick = post.isAnonymous ? '' : `onclick="app.router('profile', {userId: '${post.authorId}'})"`;
+        const authorOnclick = post.isAnonymous && !isAdminUser ? '' : `onclick="app.router('profile', {userId: '${post.authorId}'})"`;
+        const adminHint = (post.isAnonymous && isAdminUser) ? `<div style="font-size:0.8rem;color:#dc2626;margin-top:4px;">👁️ 管理员可见: 真实发布者 ${this.escapeHtml(realAuthor.nickname)} (${post.authorId})</div>` : '';
         return `
             <div class="post-detail-page">
                 <button onclick="app.router('home')" class="back-btn">← 返回</button>
                 <div class="post-detail">
                     <div class="post-header">
-                        <div class="post-author" ${authorOnclick} style="${post.isAnonymous ? 'cursor:default;' : ''}">
+                        <div class="post-author" ${authorOnclick} style="${post.isAnonymous && !isAdminUser ? 'cursor:default;' : ''}">
                             <div class="author-avatar">${this.renderAvatarContent(author.avatar)}</div>
                             <div class="author-info">
                                 <span class="author-name">${author.nickname}</span>
                                 <span class="post-time">${time}</span>
+                                ${adminHint}
                             </div>
                         </div>
                         ${post.isAnnouncement ? '<span class="announcement-badge">📢 公告</span>' : ''}
@@ -2385,8 +2443,8 @@ class ForumApp {
             let warn = '';
             if (f.type.startsWith('video/')) {
                     icon = '🎬';
-                    if (f.size > 200 * 1024) {
-                        warn = ' <span style="color:#ef4444">(超过200KB，将转为缩略图)</span>';
+                    if (f.size > 500 * 1024) {
+                        warn = ' <span style="color:#ef4444">(超过500KB，将压缩或转为缩略图)</span>';
                     } else {
                         warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
                     }
@@ -2413,9 +2471,9 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 200 * 1024;
-        const postHardLimit = 350 * 1024;
-        const postWarnLimit = 280 * 1024;
+        const videoLimit = 500 * 1024;
+        const postHardLimit = 700 * 1024;
+        const postWarnLimit = 600 * 1024;
         let hasLargeVideo = false;
         let hasAnyVideo = false;
         if (filesInput.files.length > 0) {
@@ -2436,6 +2494,31 @@ class ForumApp {
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
+                        } else if (file.size <= 30 * 1024 * 1024) {
+                            console.log('🎬 视频较大，尝试压缩:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+                            let compressed = null;
+                            try {
+                                compressed = await this.compressVideo(file, 250);
+                            } catch (compressErr) {
+                                console.warn('视频压缩失败，准备转缩略图:', compressErr);
+                            }
+                            if (compressed) {
+                                const compressedSize = Math.round(compressed.length / 1024 * 0.75);
+                                console.log('✅ 视频压缩完成，约', compressedSize, 'KB');
+                                if (compressedSize > 450) {
+                                    const thumb = await this.videoToThumbnail(file);
+                                    mediaFiles.push(thumb);
+                                    hasLargeVideo = true;
+                                    console.log('⚠️ 压缩后仍太大，转为缩略图');
+                                } else {
+                                    mediaFiles.push(compressed);
+                                }
+                            } else {
+                                const thumb = await this.videoToThumbnail(file);
+                                mediaFiles.push(thumb);
+                                hasLargeVideo = true;
+                                console.log('⚠️ 压缩失败，转为缩略图');
+                            }
                         } else {
                             const thumb = await this.videoToThumbnail(file);
                             mediaFiles.push(thumb);
@@ -2443,7 +2526,7 @@ class ForumApp {
                         }
                     } catch (e) {
                         console.error('视频处理失败:', e);
-                        alert(`视频 ${file.name} 处理失败`);
+                        alert(`视频 ${file.name} 处理失败，建议换个小视频或截图`);
                     }
                 }
             }
@@ -2471,15 +2554,15 @@ class ForumApp {
             let publishConfirmMsg = '';
 
             if (hasLargeVideo) {
-                publishConfirmMsg += '⚠️ 部分视频超过 200KB，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n提示：拍摄视频时选择最低分辨率，缩短到15秒以内，才能发布完整视频。\n\n';
+                publishConfirmMsg += '⚠️ 部分视频过大，已转为缩略图发布\n（其他用户只能看到截图，不能播放视频）\n\n提示：视频尽量短、分辨率尽量低。\n\n';
             }
 
-            if (hasAnyVideo && !hasLargeVideo && sizeKB > 250) {
-                publishConfirmMsg += '⚠️ 帖子包含完整视频，大小 ' + sizeKB.toFixed(1) + 'KB\n\n免费服务器消息大小有限制，接近上限可能导致发送失败。\n\n建议：更短更小的视频，或直接发图片。\n\n';
+            if (hasAnyVideo && !hasLargeVideo && sizeKB > postWarnLimit) {
+                publishConfirmMsg += '⚠️ 帖子包含完整视频，大小 ' + sizeKB.toFixed(1) + 'KB\n\n免费服务器消息大小有限制，接近 700KB 上限可能导致发送失败。\n\n建议：更短更小的视频，或直接发图片。\n\n';
             }
 
             if (jsonStr.length > postHardLimit) {
-                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 350KB 无法发送。\n\n请用更短更小的视频（15秒以内、最低分辨率），或只发图片。');
+                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 700KB 无法发送。\n\n请用更短更小的视频，或减少图片数量。');
                 return;
             }
 
@@ -2546,6 +2629,113 @@ class ForumApp {
             reader.onload = () => resolve(reader.result);
             reader.onerror = reject;
             reader.readAsDataURL(file);
+        });
+    }
+
+    async compressVideo(file, targetSizeKB = 80) {
+        return new Promise((resolve, reject) => {
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+            const url = URL.createObjectURL(file);
+            let resolved = false;
+
+            const cleanup = () => {
+                try { URL.revokeObjectURL(url); } catch (e) {}
+            };
+
+            video.onerror = () => {
+                if (!resolved) { resolved = true; cleanup(); reject(new Error('视频加载失败')); }
+            };
+
+            video.onloadedmetadata = async () => {
+                try {
+                    const duration = video.duration || 1;
+                    const maxDim = 480;
+                    let width = video.videoWidth || 640;
+                    let height = video.videoHeight || 480;
+                    if (width > maxDim || height > maxDim) {
+                        if (width > height) {
+                            height = Math.round(height * maxDim / width);
+                            width = maxDim;
+                        } else {
+                            width = Math.round(width * maxDim / height);
+                            height = maxDim;
+                        }
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+
+                    const tryRecord = async (bitrate) => {
+                        return new Promise((res, rej) => {
+                            const stream = canvas.captureStream();
+                            const audioStream = video.captureStream ? video.captureStream() : null;
+                            if (audioStream && audioStream.getAudioTracks().length > 0) {
+                                audioStream.getAudioTracks().forEach(track => stream.addTrack(track));
+                            }
+                            const mimeTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+                            const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+                            const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
+                            const chunks = [];
+                            recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+                            recorder.onstop = () => {
+                                const blob = new Blob(chunks, { type: 'video/webm' });
+                                res(blob);
+                            };
+                            recorder.onerror = (e) => rej(e);
+
+                            video.currentTime = 0;
+                            video.play().catch(() => {});
+                            recorder.start(100);
+                            const drawFrame = () => {
+                                if (video.paused || video.ended) return;
+                                ctx.fillStyle = '#000000';
+                                ctx.fillRect(0, 0, width, height);
+                                ctx.drawImage(video, 0, 0, width, height);
+                                requestAnimationFrame(drawFrame);
+                            };
+                            drawFrame();
+                            setTimeout(() => {
+                                recorder.stop();
+                                video.pause();
+                            }, Math.min(duration * 1000, 30000));
+                        });
+                    };
+
+                    let bitrate = 400000;
+                    let bestBlob = null;
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                        const blob = await tryRecord(bitrate);
+                        const blobKB = blob.size / 1024;
+                        console.log('🎬 视频压缩尝试', attempt + 1, '码率', bitrate, '大小', blobKB.toFixed(1), 'KB');
+                        if (!bestBlob || blob.size < bestBlob.size) bestBlob = blob;
+                        if (blobKB <= targetSizeKB) break;
+                        bitrate = Math.max(50000, Math.round(bitrate * 0.55));
+                    }
+
+                    const finalBlob = bestBlob;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        resolved = true;
+                        cleanup();
+                        resolve(reader.result);
+                    };
+                    reader.onerror = () => {
+                        resolved = true;
+                        cleanup();
+                        reject(new Error('读取压缩后视频失败'));
+                    };
+                    reader.readAsDataURL(finalBlob);
+                } catch (e) {
+                    if (!resolved) { resolved = true; cleanup(); reject(e); }
+                }
+            };
+
+            video.src = url;
         });
     }
 
@@ -2668,7 +2858,7 @@ class ForumApp {
         }
         try {
             const fullPayload = JSON.stringify({ type: 'post', data: post });
-            if (fullPayload.length <= 280 * 1024) {
+            if (fullPayload.length <= 700 * 1024) {
                 this.publish(`forum/posts/${postId}`, { type: 'post', data: post }, true);
             } else {
                 const stateOnly = {
@@ -2999,16 +3189,13 @@ class ForumApp {
             const chatJsonStr = JSON.stringify({ type: 'chat_message', data: msgData });
             const chatSizeMB = (chatJsonStr.length / 1024 / 1024).toFixed(2);
             console.log('📤 聊天消息大小:', chatSizeMB, 'MB', '类型:', mediaType);
-            if (chatJsonStr.length > 600 * 1024 && chatJsonStr.length <= 800 * 1024) {
-                alert('⚠️ 消息较大 (' + chatSizeMB + 'MB)，服务器有限制\n可能发不出去');
-            }
-            if (chatJsonStr.length > 800 * 1024 && chatJsonStr.length <= 900 * 1024) {
-                if (!confirm('🚨 消息非常大 (' + chatSizeMB + 'MB)！\n\n服务器很可能拒绝这个消息。\n是否仍然发送？')) {
+            if (chatJsonStr.length > 500 * 1024 && chatJsonStr.length <= 700 * 1024) {
+                if (!confirm('⚠️ 消息较大 (' + chatSizeMB + 'MB)\n\n服务器可能拒绝，对方可能收不到。\n是否仍然发送？')) {
                     return;
                 }
             }
-            if (chatJsonStr.length > 900 * 1024) {
-                alert('❌ 消息超过 900KB，无法发送。\n请用更短更小的视频，或发截图代替');
+            if (chatJsonStr.length > 700 * 1024) {
+                alert('❌ 消息超过 700KB，无法发送。\n请用更短更小的视频，或发截图代替');
                 return;
             }
         } catch (e) {
