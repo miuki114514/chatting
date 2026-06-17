@@ -328,13 +328,14 @@ class ForumApp {
             'forum/audit/#',
             'forum/ban/#',
             'forum/role/#',
-            'forum/friends/#',
+            'forum/deleted/posts',
+            'forum/deleted/comments',
             'forum/sync/request',
             `forum/sync/response/${this.myClientId}`
         ];
         if (this.currentUser) {
             topics.push(`forum/msg/${this.currentUser.id}/#`);
-            topics.push(`forum/friends/${this.currentUser.id}`);
+            topics.push(`forum/friends/${this.currentUser.id}/#`);
             topics.push('forum/group/#');
         }
         console.log('📡 订阅 topics:', topics);
@@ -456,14 +457,14 @@ class ForumApp {
                     if (fr.status === 'accepted' || fr.status === 'rejected' || fr.status === 'pending') {
                         const targetId = fr.from === this.currentUser?.id ? fr.to : fr.from;
                         if (targetId) {
-                            this.publish(`forum/friends/${targetId}`, { type: 'friendRequest', data: fr }, true);
+                            this.publish(`forum/friends/${targetId}/${fr.id}`, { type: 'friendRequest', data: fr }, true);
                             frCount++;
                         }
                     }
                 }
             });
             this.posts.forEach(post => {
-                if (post && post.id) {
+                if (post && post.id && !this.deletedPostIds.includes(post.id)) {
                     try {
                         const payload = JSON.stringify({ type: 'post', data: post });
                         if (payload.length <= 700 * 1024) {
@@ -477,7 +478,13 @@ class ForumApp {
                     }
                 }
             });
-            console.log(`已同步: ${userCount}用户, ${frCount}好友申请, ${postCount}帖子${postSkipped > 0 ? ' (跳过' + postSkipped + '个过大帖子)' : ''}`);
+            this.deletedPostIds.forEach((id, i) => {
+                setTimeout(() => {
+                    this.publish(`forum/posts/${id}`, { type: 'post', data: { id, _deleted: true, deletedAt: Date.now() } }, true);
+                }, i * 50);
+            });
+            setTimeout(() => this.publishDeletedPostIds(), 100);
+            console.log(`已同步: ${userCount}用户, ${frCount}好友申请, ${postCount}帖子, ${this.deletedPostIds.length}删除标记${postSkipped > 0 ? ' (跳过' + postSkipped + '个过大帖子)' : ''}`);
         } catch (e) {
             console.error('批量发布失败:', e);
         }
@@ -489,6 +496,71 @@ class ForumApp {
             clientId: this.myClientId,
             timestamp: Date.now()
         }, false);
+    }
+
+    publishDeletedPostIds() {
+        if (!this.connected || !this.client) return;
+        const ids = this.deletedPostIds.slice(-200);
+        try {
+            this.publish('forum/deleted/posts', {
+                type: 'deleted_posts',
+                data: { ids, timestamp: Date.now() }
+            }, true);
+            console.log('📋 已发布删除帖子列表:', ids.length);
+        } catch (e) {
+            console.warn('发布删除列表失败:', e);
+        }
+    }
+
+    publishDeletedCommentIds() {
+        if (!this.connected || !this.client) return;
+        const ids = this.deletedCommentIds.slice(-200);
+        try {
+            this.publish('forum/deleted/comments', {
+                type: 'deleted_comments',
+                data: { ids, timestamp: Date.now() }
+            }, true);
+            console.log('📋 已发布删除评论列表:', ids.length);
+        } catch (e) {
+            console.warn('发布删除评论列表失败:', e);
+        }
+    }
+
+    mergeDeletedPostIds(data) {
+        if (!data || !Array.isArray(data.ids)) return;
+        let changed = false;
+        data.ids.forEach(id => {
+            if (!this.deletedPostIds.includes(id)) {
+                this.deletedPostIds.push(id);
+                changed = true;
+            }
+        });
+        if (changed) {
+            this.posts = this.posts.filter(p => !this.deletedPostIds.includes(p.id));
+            this.comments = this.comments.filter(c => !this.deletedPostIds.includes(c.postId));
+            this.favorites = this.favorites.filter(id => !this.deletedPostIds.includes(id));
+            this.saveLocalData();
+            console.log('🗑️ 同步删除帖子列表，隐藏', data.ids.length, '条帖子');
+            if (this.currentPage === 'home' || this.currentPage === 'explore' || this.currentPage === 'profile' || this.currentPage === 'post') {
+                this.renderCurrentPage();
+            }
+        }
+    }
+
+    mergeDeletedCommentIds(data) {
+        if (!data || !Array.isArray(data.ids)) return;
+        let changed = false;
+        data.ids.forEach(id => {
+            if (!this.deletedCommentIds.includes(id)) {
+                this.deletedCommentIds.push(id);
+                changed = true;
+            }
+        });
+        if (changed) {
+            this.comments = this.comments.filter(c => !this.deletedCommentIds.includes(c.id));
+            this.saveLocalData();
+            console.log('🗑️ 同步删除评论列表，隐藏', data.ids.length, '条评论');
+        }
     }
 
     // ========== 消息处理 ==========
@@ -547,6 +619,12 @@ class ForumApp {
             case 'friendRequest':
                 this.mergeFriendRequest(payload.data);
                 break;
+            case 'deleted_posts':
+                this.mergeDeletedPostIds(payload.data);
+                break;
+            case 'deleted_comments':
+                this.mergeDeletedCommentIds(payload.data);
+                break;
         }
     }
 
@@ -582,18 +660,21 @@ class ForumApp {
             const newTimestamp = post.updatedAt || post.timestamp || 0;
             const oldTimestamp = existing.updatedAt || existing.timestamp || 0;
             if (newTimestamp >= oldTimestamp) {
-                if (post._state_only) {
-                    existing.isPinned = post.isPinned;
-                    existing.updatedAt = post.updatedAt;
-                    console.log('📌 收到帖子置顶状态变更:', post.id, '新状态:', post.isPinned ? '已置顶' : '未置顶');
-                } else {
-                    this.posts[existingIdx] = post;
-                    if (existing.isPinned !== post.isPinned) {
-                        console.log('📌 收到帖子置顶状态变更:', post.id, '新状态:', post.isPinned ? '已置顶' : '未置顶');
+                    if (post._state_only) {
+                        existing.isPinned = post.isPinned;
+                        if (typeof post.isAnnouncement !== 'undefined') {
+                            existing.isAnnouncement = post.isAnnouncement;
+                        }
+                        existing.updatedAt = post.updatedAt;
+                        console.log('📌 收到帖子状态变更:', post.id, '置顶:', post.isPinned ? '已置顶' : '未置顶', '公告:', post.isAnnouncement ? '公告' : '普通');
+                    } else {
+                        this.posts[existingIdx] = post;
+                        if (existing.isPinned !== post.isPinned) {
+                            console.log('📌 收到帖子置顶状态变更:', post.id, '新状态:', post.isPinned ? '已置顶' : '未置顶');
+                        }
                     }
+                    changed = true;
                 }
-                changed = true;
-            }
         } else {
             if (!post._state_only) {
                 this.posts.push(post);
@@ -861,7 +942,7 @@ class ForumApp {
         });
         this.posts.forEach((post, i) => {
             setTimeout(() => {
-                if (post && post.id) {
+                if (post && post.id && !this.deletedPostIds.includes(post.id)) {
                     try {
                         const payload = JSON.stringify({ type: 'post', data: post });
                         if (payload.length <= 700 * 1024) {
@@ -885,16 +966,23 @@ class ForumApp {
                 }
             }, i * 100);
         });
+        this.deletedPostIds.forEach((id, i) => {
+            setTimeout(() => {
+                this.publish(`forum/posts/${id}`, { type: 'post', data: { id, _deleted: true, deletedAt: Date.now() } }, true);
+            }, this.posts.length * 100 + i * 50);
+        });
         this.friendRequests.forEach((fr, i) => {
             setTimeout(() => {
                 if (fr && fr.id) {
                     const targetId = fr.from === this.currentUser?.id ? fr.to : fr.from;
                     if (targetId) {
-                        this.publish(`forum/friends/${targetId}`, { type: 'friendRequest', data: fr }, true);
+                        this.publish(`forum/friends/${targetId}/${fr.id}`, { type: 'friendRequest', data: fr }, true);
                     }
                 }
             }, i * 50);
         });
+        setTimeout(() => this.publishDeletedPostIds(), 100);
+        setTimeout(() => this.publishDeletedCommentIds(), 150);
     }
 
     applySyncData(data) {
@@ -2443,8 +2531,8 @@ class ForumApp {
             let warn = '';
             if (f.type.startsWith('video/')) {
                     icon = '🎬';
-                    if (f.size > 500 * 1024) {
-                        warn = ' <span style="color:#ef4444">(超过500KB，将压缩或转为缩略图)</span>';
+                    if (f.size > 600 * 1024) {
+                        warn = ' <span style="color:#ef4444">(超过600KB，将压缩或转为缩略图)</span>';
                     } else {
                         warn = ' <span style="color:#3b82f6">(将发布完整视频)</span>';
                     }
@@ -2471,9 +2559,9 @@ class ForumApp {
         if (isAnnouncement && !this.isAdmin(this.currentUser.id)) return alert('只有管理员可以发布公告');
 
         const mediaFiles = [];
-        const videoLimit = 500 * 1024;
-        const postHardLimit = 700 * 1024;
-        const postWarnLimit = 600 * 1024;
+        const videoLimit = 600 * 1024;
+        const postHardLimit = 900 * 1024;
+        const postWarnLimit = 750 * 1024;
         let hasLargeVideo = false;
         let hasAnyVideo = false;
         if (filesInput.files.length > 0) {
@@ -2494,18 +2582,18 @@ class ForumApp {
                             const base64 = await this.fileToBase64(file);
                             mediaFiles.push(base64);
                             console.log('✅ 视频已转为 Base64');
-                        } else if (file.size <= 30 * 1024 * 1024) {
+                        } else if (file.size <= 50 * 1024 * 1024) {
                             console.log('🎬 视频较大，尝试压缩:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
                             let compressed = null;
                             try {
-                                compressed = await this.compressVideo(file, 250);
+                                compressed = await this.compressVideo(file, 180);
                             } catch (compressErr) {
                                 console.warn('视频压缩失败，准备转缩略图:', compressErr);
                             }
                             if (compressed) {
                                 const compressedSize = Math.round(compressed.length / 1024 * 0.75);
                                 console.log('✅ 视频压缩完成，约', compressedSize, 'KB');
-                                if (compressedSize > 450) {
+                                if (compressedSize > 500) {
                                     const thumb = await this.videoToThumbnail(file);
                                     mediaFiles.push(thumb);
                                     hasLargeVideo = true;
@@ -2558,11 +2646,11 @@ class ForumApp {
             }
 
             if (hasAnyVideo && !hasLargeVideo && sizeKB > postWarnLimit) {
-                publishConfirmMsg += '⚠️ 帖子包含完整视频，大小 ' + sizeKB.toFixed(1) + 'KB\n\n免费服务器消息大小有限制，接近 700KB 上限可能导致发送失败。\n\n建议：更短更小的视频，或直接发图片。\n\n';
+                publishConfirmMsg += '⚠️ 帖子包含完整视频，大小 ' + sizeKB.toFixed(1) + 'KB\n\n免费服务器消息大小有限制，接近 900KB 上限可能导致发送失败。\n\n建议：更短更小的视频，或减少图片数量。\n\n';
             }
 
             if (jsonStr.length > postHardLimit) {
-                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 700KB 无法发送。\n\n请用更短更小的视频，或减少图片数量。');
+                alert('❌ 帖子内容过大 (' + sizeKB.toFixed(1) + 'KB)！\n\n超过 900KB 无法发送。\n\n请用更短更小的视频，或减少图片数量。');
                 return;
             }
 
@@ -2632,12 +2720,16 @@ class ForumApp {
         });
     }
 
-    async compressVideo(file, targetSizeKB = 80) {
+    async compressVideo(file, targetSizeKB = 180) {
         return new Promise((resolve, reject) => {
+            if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== 'function' || !MediaRecorder.isTypeSupported('video/webm')) {
+                return reject(new Error('当前浏览器不支持视频压缩'));
+            }
             const video = document.createElement('video');
             video.muted = true;
             video.playsInline = true;
             video.preload = 'auto';
+            video.crossOrigin = 'anonymous';
             const url = URL.createObjectURL(file);
             let resolved = false;
 
@@ -2645,14 +2737,18 @@ class ForumApp {
                 try { URL.revokeObjectURL(url); } catch (e) {}
             };
 
-            video.onerror = () => {
-                if (!resolved) { resolved = true; cleanup(); reject(new Error('视频加载失败')); }
+            const fail = (msg) => {
+                if (!resolved) { resolved = true; cleanup(); reject(new Error(msg)); }
             };
+
+            video.onerror = () => fail('视频加载失败');
 
             video.onloadedmetadata = async () => {
                 try {
                     const duration = video.duration || 1;
-                    const maxDim = 480;
+                    if (!duration || duration <= 0) return fail('无法读取视频时长');
+
+                    const maxDim = 360;
                     let width = video.videoWidth || 640;
                     let height = video.videoHeight || 480;
                     if (width > maxDim || height > maxDim) {
@@ -2672,66 +2768,79 @@ class ForumApp {
 
                     const tryRecord = async (bitrate) => {
                         return new Promise((res, rej) => {
-                            const stream = canvas.captureStream();
-                            const audioStream = video.captureStream ? video.captureStream() : null;
-                            if (audioStream && audioStream.getAudioTracks().length > 0) {
-                                audioStream.getAudioTracks().forEach(track => stream.addTrack(track));
-                            }
-                            const mimeTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-                            const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
-                            const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
-                            const chunks = [];
-                            recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-                            recorder.onstop = () => {
-                                const blob = new Blob(chunks, { type: 'video/webm' });
-                                res(blob);
-                            };
-                            recorder.onerror = (e) => rej(e);
+                            try {
+                                const stream = canvas.captureStream();
+                                if (typeof video.captureStream === 'function') {
+                                    try {
+                                        const audioStream = video.captureStream();
+                                        if (audioStream && audioStream.getAudioTracks().length > 0) {
+                                            audioStream.getAudioTracks().forEach(track => stream.addTrack(track));
+                                        }
+                                    } catch (audioErr) {
+                                        console.warn('无法捕获音频:', audioErr);
+                                    }
+                                }
+                                const mimeTypes = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+                                const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t));
+                                if (!mimeType) return rej(new Error('不支持的视频编码'));
+                                const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
+                                const chunks = [];
+                                recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+                                recorder.onstop = () => {
+                                    try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+                                    const blob = new Blob(chunks, { type: 'video/webm' });
+                                    res(blob);
+                                };
+                                recorder.onerror = (e) => {
+                                    try { stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+                                    rej(e);
+                                };
 
-                            video.currentTime = 0;
-                            video.play().catch(() => {});
-                            recorder.start(100);
-                            const drawFrame = () => {
-                                if (video.paused || video.ended) return;
-                                ctx.fillStyle = '#000000';
-                                ctx.fillRect(0, 0, width, height);
-                                ctx.drawImage(video, 0, 0, width, height);
-                                requestAnimationFrame(drawFrame);
-                            };
-                            drawFrame();
-                            setTimeout(() => {
-                                recorder.stop();
-                                video.pause();
-                            }, Math.min(duration * 1000, 30000));
+                                video.currentTime = 0;
+                                video.play().catch(() => {});
+                                recorder.start(100);
+                                const drawFrame = () => {
+                                    if (video.paused || video.ended || resolved) return;
+                                    ctx.fillStyle = '#000000';
+                                    ctx.fillRect(0, 0, width, height);
+                                    ctx.drawImage(video, 0, 0, width, height);
+                                    requestAnimationFrame(drawFrame);
+                                };
+                                drawFrame();
+                                const recordMs = Math.min(duration * 1000, 30000);
+                                setTimeout(() => {
+                                    try { recorder.stop(); } catch (e) {}
+                                    try { video.pause(); } catch (e) {}
+                                }, recordMs);
+                            } catch (e) {
+                                rej(e);
+                            }
                         });
                     };
 
-                    let bitrate = 400000;
+                    let bitrate = Math.min(450000, Math.max(60000, Math.round((targetSizeKB * 1024 * 8) / duration)));
                     let bestBlob = null;
-                    for (let attempt = 0; attempt < 5; attempt++) {
+                    for (let attempt = 0; attempt < 7; attempt++) {
                         const blob = await tryRecord(bitrate);
                         const blobKB = blob.size / 1024;
                         console.log('🎬 视频压缩尝试', attempt + 1, '码率', bitrate, '大小', blobKB.toFixed(1), 'KB');
                         if (!bestBlob || blob.size < bestBlob.size) bestBlob = blob;
                         if (blobKB <= targetSizeKB) break;
-                        bitrate = Math.max(50000, Math.round(bitrate * 0.55));
+                        bitrate = Math.max(40000, Math.round(bitrate * 0.55));
                     }
 
                     const finalBlob = bestBlob;
+                    if (!finalBlob || finalBlob.size === 0) return fail('压缩后视频为空');
                     const reader = new FileReader();
                     reader.onload = () => {
                         resolved = true;
                         cleanup();
                         resolve(reader.result);
                     };
-                    reader.onerror = () => {
-                        resolved = true;
-                        cleanup();
-                        reject(new Error('读取压缩后视频失败'));
-                    };
+                    reader.onerror = () => fail('读取压缩后视频失败');
                     reader.readAsDataURL(finalBlob);
                 } catch (e) {
-                    if (!resolved) { resolved = true; cleanup(); reject(e); }
+                    fail(e.message || '压缩异常');
                 }
             };
 
@@ -2907,6 +3016,7 @@ class ForumApp {
                 deletedBy: this.currentUser.id
             };
             this.publish(`forum/posts/${postId}`, { type: 'post', data: deletedPost }, true);
+            this.publishDeletedPostIds();
             console.log('🗑️ 删除帖子:', postId);
         } catch (e) {
             console.warn('同步删除失败:', e);
@@ -2943,6 +3053,7 @@ class ForumApp {
                 deletedBy: this.currentUser.id
             };
             this.publish(`forum/comments/${commentId}`, { type: 'comment', data: deletedComment }, true);
+            this.publishDeletedCommentIds();
             console.log('🗑️ 删除评论:', commentId);
         } catch (e) {
             console.warn('同步删除失败:', e);
@@ -2963,7 +3074,25 @@ class ForumApp {
             console.warn('本地保存失败:', e);
         }
         try {
-            this.publish(`forum/posts/${postId}`, { type: 'post', data: post }, true);
+            const fullPayload = JSON.stringify({ type: 'post', data: post });
+            if (fullPayload.length <= 700 * 1024) {
+                this.publish(`forum/posts/${postId}`, { type: 'post', data: post }, true);
+            } else {
+                const stateOnly = {
+                    id: post.id,
+                    isPinned: post.isPinned,
+                    isAnnouncement: post.isAnnouncement,
+                    updatedAt: post.updatedAt,
+                    _state_only: true,
+                    title: post.title,
+                    content: post.content,
+                    authorId: post.authorId,
+                    isAnonymous: post.isAnonymous,
+                    timestamp: post.timestamp
+                };
+                this.publish(`forum/posts/${postId}`, { type: 'post_state', data: stateOnly }, true);
+                console.log('📢 帖子过大，发布状态更新代替完整帖子');
+            }
         } catch (e) {
             console.warn('同步公告状态失败:', e);
         }
@@ -3436,8 +3565,8 @@ class ForumApp {
         this.friendRequests.push(req);
         this.saveLocalData();
         try {
-            this.publish(`forum/friends/${toUserId}`, { type: 'friendRequest', data: req }, true);
-            this.publish(`forum/friends/${me}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${toUserId}/${req.id}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${me}/${req.id}`, { type: 'friendRequest', data: req }, true);
             console.log('📤 发送私聊申请:', req);
         } catch (e) { console.warn('同步好友申请失败:', e); }
         alert('✅ 私聊申请已发送！等待对方同意后即可开始聊天\n\n提示：如果对方在线，对方会立即收到通知。如果对方稍后打开页面，也会收到这个申请。');
@@ -3453,8 +3582,8 @@ class ForumApp {
         req.acceptedAt = Date.now();
         this.saveLocalData();
         try {
-            this.publish(`forum/friends/${fromUserId}`, { type: 'friendRequest', data: req }, true);
-            this.publish(`forum/friends/${me}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${fromUserId}/${req.id}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${me}/${req.id}`, { type: 'friendRequest', data: req }, true);
             console.log('✅ 同意私聊申请:', req);
         } catch (e) { console.warn('同步好友状态失败:', e); }
         alert('✅ 已同意私聊申请！现在可以聊天了');
@@ -3469,8 +3598,8 @@ class ForumApp {
         req.status = 'rejected';
         this.saveLocalData();
         try {
-            this.publish(`forum/friends/${fromUserId}`, { type: 'friendRequest', data: req }, true);
-            this.publish(`forum/friends/${me}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${fromUserId}/${req.id}`, { type: 'friendRequest', data: req }, true);
+            this.publish(`forum/friends/${me}/${req.id}`, { type: 'friendRequest', data: req }, true);
             console.log('❌ 拒绝私聊申请:', req);
         } catch (e) { console.warn('同步好友状态失败:', e); }
         alert('已拒绝私聊申请');
