@@ -19,6 +19,8 @@ class ForumApp {
         this.comments = [];
         this.messages = {};
         this.friendRequests = [];
+        this.groups = [];
+        this.groupMessages = {};
         this.deletedPostIds = [];
         this.deletedCommentIds = [];
         try {
@@ -98,6 +100,8 @@ class ForumApp {
                 this.comments = parsed.comments || [];
                 this.messages = parsed.messages || {};
                 this.friendRequests = parsed.friendRequests || [];
+                this.groups = parsed.groups || [];
+                this.groupMessages = parsed.groupMessages || {};
                 this.deletedPostIds = parsed.deletedPostIds || [];
                 this.deletedCommentIds = parsed.deletedCommentIds || [];
                 // 强力过滤：确保posts中不包含已删除帖子
@@ -156,6 +160,8 @@ class ForumApp {
             this.comments = [];
             this.messages = {};
             this.friendRequests = [];
+            this.groups = [];
+            this.groupMessages = {};
             this.deletedPostIds = [];
             this.deletedCommentIds = [];
         }
@@ -169,6 +175,8 @@ class ForumApp {
                 comments: this.comments,
                 messages: this.messages,
                 friendRequests: this.friendRequests,
+                groups: this.groups,
+                groupMessages: this.groupMessages,
                 deletedPostIds: this.deletedPostIds,
                 deletedCommentIds: this.deletedCommentIds
             };
@@ -327,6 +335,7 @@ class ForumApp {
         if (this.currentUser) {
             topics.push(`forum/msg/${this.currentUser.id}/#`);
             topics.push(`forum/friends/${this.currentUser.id}`);
+            topics.push('forum/group/#');
         }
         console.log('📡 订阅 topics:', topics);
         topics.forEach(t => this.client.subscribe(t, { qos: 1 }, (err) => {
@@ -512,6 +521,12 @@ class ForumApp {
                 break;
             case 'chat_message':
                 this.handleChatMessage(payload.data);
+                break;
+            case 'group_message':
+                this.handleGroupMessage(payload.data);
+                break;
+            case 'group_meta':
+                this.mergeGroupMeta(payload.data);
                 break;
             case 'friendRequest':
                 this.mergeFriendRequest(payload.data);
@@ -877,10 +892,11 @@ class ForumApp {
         this.currentPage = page;
         if (params.postId) this.currentPostId = params.postId;
         if (params.friendId) this.currentFriendId = params.friendId;
+        if (params.groupId) this.currentGroupId = params.groupId;
         document.querySelectorAll('.nav-btn, .nav-btn-mobile').forEach(btn => btn.classList.remove('active'));
         document.querySelectorAll(`[data-page="${page}"]`).forEach(btn => btn.classList.add('active'));
 
-        const restrictedPages = ['home', 'explore', 'favorites', 'admin', 'profile', 'post', 'pending', 'rejected', 'chat', 'chats'];
+        const restrictedPages = ['home', 'explore', 'favorites', 'admin', 'profile', 'post', 'pending', 'rejected', 'chat', 'chats', 'group_chat', 'group_create'];
         if (restrictedPages.includes(page) && !this.currentUser) {
             main.innerHTML = this.renderLogin();
             return;
@@ -974,6 +990,18 @@ class ForumApp {
                     }, 50);
                 }
                 break;
+            case 'group_chat':
+                main.innerHTML = this.renderGroupChat(params.groupId);
+                if (!isPassiveRender) {
+                    setTimeout(() => {
+                        const msgArea = document.getElementById('group-chat-messages');
+                        if (msgArea) msgArea.scrollTop = msgArea.scrollHeight;
+                        const input = document.getElementById('group-chat-input');
+                        if (input) input.focus();
+                    }, 50);
+                }
+                break;
+            case 'group_create': main.innerHTML = this.renderGroupCreate(); break;
         }
 
         if (isPassiveRender) {
@@ -1003,7 +1031,7 @@ class ForumApp {
             clearTimeout(this._renderTimer);
         }
         this._renderTimer = setTimeout(() => {
-            this.router(this.currentPage, { _passiveRender: true, postId: this.currentPostId, friendId: this.currentFriendId });
+            this.router(this.currentPage, { _passiveRender: true, postId: this.currentPostId, friendId: this.currentFriendId, groupId: this.currentGroupId });
             this.updateNotificationBadge();
         }, 300);
     }
@@ -3300,11 +3328,43 @@ class ForumApp {
                 </div>
             `;
         }
-        if (contacts.length === 0) {
+        const myGroups = this.getGroupContacts();
+        const groupItems = myGroups.map(group => {
+            const lastMsg = (this.groupMessages[group.id] || []).slice(-1)[0];
+            let preview = '点击开始群聊';
+            if (lastMsg) {
+                const sender = this.users[lastMsg.from] || { nickname: '未知用户' };
+                if (lastMsg.content) {
+                    preview = `${sender.nickname}: ${lastMsg.content.slice(0, 40)}`;
+                } else if (lastMsg.mediaType === 'image') {
+                    preview = `${sender.nickname}: [图片]`;
+                } else if (lastMsg.mediaType === 'video') {
+                    preview = `${sender.nickname}: [视频]`;
+                } else if (lastMsg.mediaType === 'voice') {
+                    preview = `${sender.nickname}: [语音]`;
+                }
+            }
+            const time = lastMsg ? new Date(lastMsg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+            return `
+                <div class="chat-item" onclick="app.router('group_chat', { groupId: '${group.id}' })" style="background:#f0f9ff;border-left:3px solid #3b82f6;">
+                    <div class="chat-avatar" style="font-size:1.3rem;">${group.avatar}</div>
+                    <div class="chat-info">
+                        <div class="chat-name-row">
+                            <span class="chat-name">${group.name}</span>
+                            <span class="chat-time">${time}</span>
+                        </div>
+                        <div class="chat-preview">${preview}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        if (contacts.length === 0 && myGroups.length === 0) {
             return `
                 <div class="chats-page">
-                    <div class="page-header">
-                        <h2>💬 私聊消息</h2>
+                    <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;">
+                        <h2>💬 消息</h2>
+                        <button onclick="app.router('group_create')" class="btn btn-primary" style="padding:6px 14px;font-size:0.9rem;">👥 建群</button>
                     </div>
                     ${requestHtml}
                     <div class="empty-state">
@@ -3351,13 +3411,13 @@ class ForumApp {
         }).join('');
         return `
             <div class="chats-page">
-                <div class="page-header">
-                    <h2>💬 私聊消息</h2>
+                <div class="page-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    <h2>💬 消息</h2>
+                    <button onclick="app.router('group_create')" class="btn btn-primary" style="padding:6px 14px;font-size:0.9rem;">👥 建群</button>
                 </div>
                 ${requestHtml}
-                <div class="chat-list">
-                    ${chatItems}
-                </div>
+                ${myGroups.length > 0 ? `<div class="chat-list">${groupItems}</div>` : ''}
+                ${contacts.length > 0 ? `<div class="chat-list">${chatItems}</div>` : ''}
             </div>
         `;
     }
@@ -3495,6 +3555,364 @@ class ForumApp {
                     <button class="chat-media-btn" id="voice-btn" onclick="app.startVoiceRecord('${friendId}')" title="点击开始录音">🎙️</button>
                     <input type="text" id="chat-input" placeholder="输入消息..." onkeydown="if(event.key==='Enter'){event.preventDefault();app.submitChatMessage('${friendId}');}" autocomplete="off">
                     <button class="btn btn-primary" onclick="app.submitChatMessage('${friendId}')">发送</button>
+                </div>
+            </div>
+        `;
+    }
+
+    // ========== 小群聊功能 ==========
+    createGroup(name, memberIds) {
+        if (!this.currentUser) return alert('请先登录');
+        if (!name.trim()) return alert('请输入群名称');
+        const allMembers = [...new Set([this.currentUser.id, ...memberIds])];
+        if (allMembers.length < 2) return alert('至少邀请一位好友');
+        const groupId = 'group_' + Date.now();
+        const group = {
+            id: groupId,
+            name: name.trim(),
+            members: allMembers,
+            createdBy: this.currentUser.id,
+            timestamp: Date.now(),
+            avatar: '👥',
+            removedMembers: []
+        };
+        this.groups.push(group);
+        this.saveLocalData();
+        this.publish(`forum/groupmeta/${groupId}`, { type: 'group_meta', data: group }, true);
+        alert('✅ 群聊创建成功！');
+        this.router('group_chat', { groupId });
+    }
+
+    mergeGroupMeta(groupData) {
+        if (!groupData || !groupData.id) return;
+        const existingIdx = this.groups.findIndex(g => g.id === groupData.id);
+        if (existingIdx >= 0) {
+            const existing = this.groups[existingIdx];
+            const newTs = groupData.timestamp || 0;
+            const oldTs = existing.timestamp || 0;
+            if (newTs >= oldTs) {
+                this.groups[existingIdx] = groupData;
+                this.saveLocalData();
+                console.log('🔄 更新群组信息:', groupData.name);
+            }
+        } else {
+            this.groups.push(groupData);
+            this.saveLocalData();
+            console.log('📥 收到新群组:', groupData.name);
+        }
+        if (this.currentPage === 'chats') {
+            this.renderCurrentPage();
+        }
+    }
+
+    sendGroupMessage(groupId, content, mediaType = null, mediaData = null, extraData = null) {
+        if (!this.currentUser) return;
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) return alert('群聊不存在');
+        const isMember = group.members.includes(this.currentUser.id) && !group.removedMembers?.includes(this.currentUser.id);
+        if (!isMember) return alert('你已不在该群聊中');
+        const msgId = 'gm_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+        const msgData = {
+            id: msgId,
+            from: this.currentUser.id,
+            groupId: groupId,
+            content: content || '',
+            mediaType: mediaType,
+            media: mediaData,
+            timestamp: Date.now(),
+            ...extraData
+        };
+        if (!this.groupMessages[groupId]) {
+            this.groupMessages[groupId] = [];
+        }
+        this.groupMessages[groupId].push(msgData);
+        try {
+            this.saveLocalData();
+        } catch (e) {
+            console.warn('群聊消息本地保存失败:', e);
+        }
+        try {
+            const chatJsonStr = JSON.stringify({ type: 'group_message', data: msgData });
+            const chatSizeMB = (chatJsonStr.length / 1024 / 1024).toFixed(2);
+            console.log('📤 群聊消息大小:', chatSizeMB, 'MB', '类型:', mediaType);
+            if (chatJsonStr.length > 900 * 1024) {
+                alert('❌ 消息超过 900KB，无法发送。\n请用更短更小的视频，或发截图代替');
+                return;
+            }
+        } catch (e) {
+            console.warn('计算群聊消息大小失败:', e);
+        }
+        this.publish(`forum/group/${groupId}/${msgId}`, { type: 'group_message', data: msgData }, true, (err) => {
+            if (err) {
+                console.error('群聊消息发送失败:', err);
+                alert('❌ 消息发送失败：内容太大，群成员收不到');
+            }
+        });
+        this.refreshGroupChatUI(groupId);
+    }
+
+    handleGroupMessage(msgData) {
+        if (!this.currentUser) return;
+        if (!msgData || !msgData.groupId) {
+            console.warn('无效的群聊消息格式:', msgData);
+            return;
+        }
+        const group = this.groups.find(g => g.id === msgData.groupId);
+        if (!group) {
+            console.log('⚠️ 收到群聊消息但群组不存在:', msgData.groupId);
+            return;
+        }
+        const isMember = group.members.includes(this.currentUser.id) && !group.removedMembers?.includes(this.currentUser.id);
+        if (!isMember) {
+            console.log('⚠️ 群聊消息与当前用户无关:', msgData.groupId);
+            return;
+        }
+        if (!this.groupMessages[msgData.groupId]) {
+            this.groupMessages[msgData.groupId] = [];
+        }
+        const exists = this.groupMessages[msgData.groupId].find(m => m.id === msgData.id);
+        if (!exists) {
+            this.groupMessages[msgData.groupId].push(msgData);
+            try {
+                this.saveLocalData();
+            } catch (e) {
+                console.warn('群聊消息本地保存失败:', e);
+            }
+            const fromUser = this.users[msgData.from] || { nickname: msgData.from, avatar: '👤' };
+            console.log('💬 收到群聊消息:', '来自 ' + fromUser.nickname, msgData.content ? msgData.content.substring(0, 50) : '[图片/语音/视频]');
+            if (this.currentPage === 'group_chat' && this.currentGroupId === msgData.groupId) {
+                this.refreshGroupChatUI(msgData.groupId);
+            }
+        }
+    }
+
+    leaveGroup(groupId) {
+        if (!this.currentUser) return;
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) return;
+        if (!confirm(`确定退出群聊 "${group.name}" 吗？`)) return;
+        group.members = group.members.filter(id => id !== this.currentUser.id);
+        if (!group.removedMembers) group.removedMembers = [];
+        group.removedMembers.push(this.currentUser.id);
+        group.timestamp = Date.now();
+        this.saveLocalData();
+        this.publish(`forum/groupmeta/${groupId}`, { type: 'group_meta', data: group }, true);
+        alert('已退出群聊');
+        this.router('chats');
+    }
+
+    refreshGroupChatUI(groupId) {
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) return;
+        const msgs = (this.groupMessages[groupId] || []).sort((a, b) => a.timestamp - b.timestamp);
+        const msgArea = document.getElementById('group-chat-messages');
+        if (!msgArea) return;
+        let lastDate = '';
+        const messagesHtml = msgs.map(msg => {
+            const isMe = msg.from === this.currentUser.id;
+            const fromUser = this.users[msg.from] || { nickname: '未知用户', avatar: '👤' };
+            const d = new Date(msg.timestamp);
+            const dateStr = d.toLocaleDateString('zh-CN');
+            const timeStr = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            let dateDivider = '';
+            if (dateStr !== lastDate) {
+                dateDivider = `<div class="chat-date-divider"><span>${dateStr}</span></div>`;
+                lastDate = dateStr;
+            }
+            let mediaHtml = '';
+            if (msg.mediaType && msg.media) {
+                if (msg.mediaType === 'image') {
+                    mediaHtml = `<div style="margin-top:8px;"><img src="${msg.media}" style="max-width:200px;max-height:200px;border-radius:12px;display:block;cursor:zoom-in;" onclick="app.showImageModal('${msg.media}')"></div>`;
+                } else if (msg.mediaType === 'video') {
+                    mediaHtml = `<div style="margin-top:8px;"><video src="${msg.media}" controls muted preload="metadata" style="max-width:260px;max-height:240px;border-radius:12px;display:block;"></video></div>`;
+                } else if (msg.mediaType === 'voice') {
+                    const dur = msg.duration ? Math.round(msg.duration) + ' 秒' : '语音';
+                    mediaHtml = `<div style="margin-top:8px;display:flex;align-items:center;gap:8px;min-width:160px;">
+                        <button onclick="this.nextElementSibling.play()" style="background:transparent;border:none;font-size:1.3rem;cursor:pointer;">▶️</button>
+                        <audio src="${msg.media}" style="max-width:200px;"></audio>
+                        <span style="font-size:0.85rem;opacity:0.7;">🎙️ ${dur}</span>
+                    </div>`;
+                }
+            }
+            const textHtml = msg.content ? `<div class="msg-content">${this.escapeHtml(msg.content)}</div>` : '';
+            return `
+                ${dateDivider}
+                <div class="chat-message ${isMe ? 'mine' : 'theirs'}">
+                    ${!isMe ? `<div class="msg-avatar">${this.renderAvatarContent(fromUser.avatar)}</div>` : ''}
+                    <div class="msg-bubble">
+                        ${!isMe ? `<div style="font-size:0.75rem;opacity:0.6;margin-bottom:2px;">${fromUser.nickname}</div>` : ''}
+                        ${textHtml}
+                        ${mediaHtml}
+                        <div class="msg-time">${timeStr}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        msgArea.innerHTML = messagesHtml;
+        msgArea.scrollTop = msgArea.scrollHeight;
+    }
+
+    submitGroupChatMessage(groupId) {
+        const input = document.getElementById('group-chat-input');
+        if (!input) return;
+        const content = input.value;
+        if (!content.trim()) return;
+        this.sendGroupMessage(groupId, content);
+        input.value = '';
+        input.focus();
+    }
+
+    async submitGroupChatFile(groupId) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*,video/*';
+        input.onchange = async () => {
+            const file = input.files[0];
+            if (!file) return;
+            try {
+                if (file.type.startsWith('image/')) {
+                    const base64 = await this.compressImage(file);
+                    this.sendGroupMessage(groupId, '', 'image', base64);
+                } else if (file.type.startsWith('video/')) {
+                    if (file.size <= 1 * 1024 * 1024) {
+                        const base64 = await this.fileToBase64(file);
+                        this.sendGroupMessage(groupId, '', 'video', base64);
+                    } else {
+                        const thumb = await this.videoToThumbnail(file);
+                        this.sendGroupMessage(groupId, '', 'video', thumb);
+                        alert('视频超过 1MB，已转为缩略图发送');
+                    }
+                }
+            } catch (err) {
+                console.error('文件处理失败:', err);
+                alert('文件处理失败');
+            }
+        };
+        input.click();
+    }
+
+    getGroupContacts() {
+        if (!this.currentUser) return [];
+        return this.groups.filter(g =>
+            g.members.includes(this.currentUser.id) &&
+            !g.removedMembers?.includes(this.currentUser.id)
+        );
+    }
+
+    renderGroupCreate() {
+        const friends = this.getChatContacts().map(id => this.users[id] || { id, nickname: id, avatar: '👤' });
+        return `
+            <div class="auth-page">
+                <div class="auth-container" style="max-width:480px;">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+                        <button onclick="app.router('chats')" class="btn btn-secondary" style="padding:6px 12px;">← 返回</button>
+                        <h2 style="margin:0;">👥 创建群聊</h2>
+                    </div>
+                    <div style="margin-bottom:16px;">
+                        <label style="display:block;margin-bottom:6px;font-weight:500;">群名称</label>
+                        <input type="text" id="group-name" placeholder="输入群聊名称" class="form-input" style="width:100%;">
+                    </div>
+                    <div style="margin-bottom:20px;">
+                        <label style="display:block;margin-bottom:6px;font-weight:500;">选择成员（至少1位）</label>
+                        ${friends.length === 0 ? '<div style="color:#999;padding:12px;">你还没有私聊好友，先去添加好友吧</div>' : ''}
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            ${friends.map(f => `
+                                <label style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer;">
+                                    <input type="checkbox" value="${f.id}" class="group-member-check" style="width:18px;height:18px;">
+                                    <div class="chat-avatar" style="width:32px;height:32px;font-size:1rem;">${this.renderAvatarContent(f.avatar)}</div>
+                                    <span>${f.nickname || f.id}</span>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <button onclick="app.doCreateGroup()" class="btn btn-primary btn-block" ${friends.length === 0 ? 'disabled style="opacity:0.5;"' : ''}>✅ 创建群聊</button>
+                </div>
+            </div>
+        `;
+    }
+
+    doCreateGroup() {
+        const name = document.getElementById('group-name').value.trim();
+        const checkboxes = document.querySelectorAll('.group-member-check:checked');
+        const memberIds = Array.from(checkboxes).map(cb => cb.value);
+        this.createGroup(name, memberIds);
+    }
+
+    renderGroupChat(groupId) {
+        const group = this.groups.find(g => g.id === groupId);
+        if (!group) {
+            return `<div class="empty-state" style="margin-top:100px;"><h3>群聊不存在</h3><button onclick="app.router('chats')" class="btn btn-primary">返回</button></div>`;
+        }
+        const isMember = group.members.includes(this.currentUser.id) && !group.removedMembers?.includes(this.currentUser.id);
+        if (!isMember) {
+            return `<div class="empty-state" style="margin-top:100px;"><h3>你已不在该群聊中</h3><button onclick="app.router('chats')" class="btn btn-primary">返回</button></div>`;
+        }
+        this.currentGroupId = groupId;
+        const msgs = (this.groupMessages[groupId] || []).sort((a, b) => a.timestamp - b.timestamp);
+        let lastDate = '';
+        const messagesHtml = msgs.map(msg => {
+            const isMe = msg.from === this.currentUser.id;
+            const fromUser = this.users[msg.from] || { nickname: '未知用户', avatar: '👤' };
+            const d = new Date(msg.timestamp);
+            const dateStr = d.toLocaleDateString('zh-CN');
+            const timeStr = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            let dateDivider = '';
+            if (dateStr !== lastDate) {
+                dateDivider = `<div class="chat-date-divider"><span>${dateStr}</span></div>`;
+                lastDate = dateStr;
+            }
+            let mediaHtml = '';
+            if (msg.mediaType && msg.media) {
+                if (msg.mediaType === 'image') {
+                    mediaHtml = `<div style="margin-top:8px;"><img src="${msg.media}" style="max-width:200px;max-height:200px;border-radius:12px;display:block;cursor:zoom-in;" onclick="app.showImageModal('${msg.media}')"></div>`;
+                } else if (msg.mediaType === 'video') {
+                    mediaHtml = `<div style="margin-top:8px;"><video src="${msg.media}" controls muted preload="metadata" style="max-width:260px;max-height:240px;border-radius:12px;display:block;"></video></div>`;
+                } else if (msg.mediaType === 'voice') {
+                    const dur = msg.duration ? Math.round(msg.duration) + ' 秒' : '语音';
+                    mediaHtml = `<div style="margin-top:8px;display:flex;align-items:center;gap:8px;min-width:160px;">
+                        <button onclick="this.nextElementSibling.play()" style="background:transparent;border:none;font-size:1.3rem;cursor:pointer;">▶️</button>
+                        <audio src="${msg.media}" style="max-width:200px;"></audio>
+                        <span style="font-size:0.85rem;opacity:0.7;">🎙️ ${dur}</span>
+                    </div>`;
+                }
+            }
+            const textHtml = msg.content ? `<div class="msg-content">${this.escapeHtml(msg.content)}</div>` : '';
+            return `
+                ${dateDivider}
+                <div class="chat-message ${isMe ? 'mine' : 'theirs'}">
+                    ${!isMe ? `<div class="msg-avatar">${this.renderAvatarContent(fromUser.avatar)}</div>` : ''}
+                    <div class="msg-bubble">
+                        ${!isMe ? `<div style="font-size:0.75rem;opacity:0.6;margin-bottom:2px;">${fromUser.nickname}</div>` : ''}
+                        ${textHtml}
+                        ${mediaHtml}
+                        <div class="msg-time">${timeStr}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        return `
+            <div class="chat-page">
+                <div class="chat-header">
+                    <button class="back-btn" onclick="app.router('chats')">←</button>
+                    <div class="chat-header-avatar" style="font-size:1.5rem;">${group.avatar}</div>
+                    <div class="chat-header-info">
+                        <h3>${group.name}</h3>
+                        <div style="font-size:0.8rem;opacity:0.7;">${group.members.filter(m => !group.removedMembers?.includes(m)).length} 人</div>
+                    </div>
+                    <button onclick="app.leaveGroup('${groupId}')" class="btn btn-small" style="margin-left:auto;background:#fee2e2;color:#dc2626;">退出</button>
+                </div>
+                <div class="chat-messages" id="group-chat-messages">
+                    ${msgs.length === 0 ? `
+                        <div class="empty-state" style="margin-top:100px;">
+                            <div class="empty-icon">👋</div>
+                            <p>还没有消息，发送第一条消息开始群聊吧！</p>
+                        </div>
+                    ` : messagesHtml}
+                </div>
+                <div class="chat-input-bar">
+                    <button class="chat-media-btn" onclick="app.submitGroupChatFile('${groupId}')" title="发送图片/视频">📎</button>
+                    <input type="text" id="group-chat-input" placeholder="输入消息..." onkeydown="if(event.key==='Enter'){event.preventDefault();app.submitGroupChatMessage('${groupId}');}" autocomplete="off">
+                    <button class="btn btn-primary" onclick="app.submitGroupChatMessage('${groupId}')">发送</button>
                 </div>
             </div>
         `;
